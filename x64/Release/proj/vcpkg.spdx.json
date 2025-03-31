@@ -1,0 +1,198 @@
+{
+  "$schema": "https://raw.githubusercontent.com/spdx/spdx-spec/v2.2.1/schemas/spdx-schema.json",
+  "spdxVersion": "SPDX-2.2",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "documentNamespace": "https://spdx.org/spdxdocs/proj-x64-windows-9.5.0-979f0bb9-e841-4c37-ab30-565957026860",
+  "name": "proj:x64-windows@9.5.0 e006a823ff84f638b517d6a7e931285fc4bd497ba42b0750d666ad0857a2b8d1",
+  "creationInfo": {
+    "creators": [
+      "Tool: vcpkg-2024-10-18-e392d7347fe72dff56e7857f7571c22301237ae6"
+    ],
+    "created": "2024-11-01T10:39:11Z"
+  },
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "GENERATES",
+      "relatedSpdxElement": "SPDXRef-binary"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-file-0"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-file-1"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-file-2"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-file-3"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-file-4"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-file-5"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "GENERATED_FROM",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-file-0",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-file-1",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-file-2",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-file-3",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-file-4",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-file-5",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-port"
+    }
+  ],
+  "packages": [
+    {
+      "name": "proj",
+      "SPDXID": "SPDXRef-port",
+      "versionInfo": "9.5.0",
+      "downloadLocation": "git+https://github.com/Microsoft/vcpkg#ports/proj",
+      "homepage": "https://proj.org/",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "description": "PROJ library for cartographic projections",
+      "comment": "This is the port (recipe) consumed by vcpkg."
+    },
+    {
+      "name": "proj:x64-windows",
+      "SPDXID": "SPDXRef-binary",
+      "versionInfo": "e006a823ff84f638b517d6a7e931285fc4bd497ba42b0750d666ad0857a2b8d1",
+      "downloadLocation": "NONE",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "comment": "This is a binary package built by vcpkg."
+    },
+    {
+      "SPDXID": "SPDXRef-resource-1",
+      "name": "OSGeo/PROJ",
+      "downloadLocation": "git+https://github.com/OSGeo/PROJ@9.5.0",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "8fb672e664951f849926743b8a44b5052ed83fd51c6fdcc0cd5aa7fe4bf428ec0a8627d90cc6690c21e51f593f5e7c29c933a02a9fc57625baa122d4c96d5727"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "fileName": "./D:/Code/vcpkg/ports/proj/fix-proj4-targets-cmake.patch",
+      "SPDXID": "SPDXRef-file-0",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "d76e1d419d3367dda3381fd11a637f3465bc838d611fa8ceaca20048c1b3cd6e"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./D:/Code/vcpkg/ports/proj/portfile.cmake",
+      "SPDXID": "SPDXRef-file-1",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "e364d4d07cda4daa891f0bc66903196335d6d79aed9e66ce8b2d2352eba5a16b"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./D:/Code/vcpkg/ports/proj/remove_toolset_restriction.patch",
+      "SPDXID": "SPDXRef-file-2",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "25c1c986673bd539f5ec920684a08b38d0d37d9e24b6793e5b79dbd717bde04e"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./D:/Code/vcpkg/ports/proj/sqlite.diff",
+      "SPDXID": "SPDXRef-file-3",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "75049bf707593bb9a22a6f77ccc062fe1343484a12920adc7be5c29c14746857"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./D:/Code/vcpkg/ports/proj/usage",
+      "SPDXID": "SPDXRef-file-4",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "26169363c27e71a44cba9d703b22bbd13c191ab5e2d0612b3dd35c735c971fe6"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./D:/Code/vcpkg/ports/proj/vcpkg.json",
+      "SPDXID": "SPDXRef-file-5",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "fefee35035875bf79c1a2121cd18308f3c7722a4c1ffb0294238e5f5993f8371"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    }
+  ]
+}
