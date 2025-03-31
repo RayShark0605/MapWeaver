@@ -37,8 +37,12 @@ public:
 	Point2d GetCenterPoint() const;
 	Point2d GetMinPoint() const;
 	Point2d GetMaxPoint() const;
+
+	// 分别交换左下角点和右下角点的XY坐标
 	void Invert();
 	Rectangle Invert() const;
+
+	// 转换成例如"-180,-90,180,90"这样的字符串
 	std::string ToString() const;
 
 private:
@@ -50,7 +54,7 @@ private:
 
 struct BoundingBox
 {
-	std::string crs = "";
+	std::string crs = ""; // 坐标系的标识符，例如"CRS:84"、"EPSG:3857"等
 	Rectangle bbox;
 
 	BoundingBox();
@@ -70,7 +74,6 @@ struct KeyValuePair
 	KeyValuePair() = default;
 	KeyValuePair(const std::string& key, const std::string& value);
 };
-
 
 // URL字符串处理
 class URLProcessing

@@ -7,16 +7,18 @@
 #include <vector>
 #include <atomic>
 
+// 生产者-消费者模式的线程池
 class ThreadPool
 {
 public:
 	explicit ThreadPool(size_t numThreads);
+	~ThreadPool();
 
 	template <class F, class... Args>
 	void Enqueue(F&& f, Args&&... args);
 
+	// 等待所有线程执行完毕
 	void WaitAll();
-	~ThreadPool();
 
 private:
 	std::vector<std::thread> workers;

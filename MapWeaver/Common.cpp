@@ -82,7 +82,7 @@ Rectangle Rectangle::Invert() const
 	return result;
 }
 
-std::string Rectangle::ToString() const
+string Rectangle::ToString() const
 {
 	return to_string(minX) + "," + to_string(minY) + "," + to_string(maxX) + "," + to_string(maxY);
 }
@@ -500,7 +500,7 @@ vector<Point2d> GetIntersectionVertices(const vector<Point2d>& points1, const ve
 	if (intersection && !intersection->IsEmpty())
 	{
 		ExtractPoints(intersection, ogrResult);
-		auto last = std::unique(ogrResult.begin(), ogrResult.end(),
+		auto last = unique(ogrResult.begin(), ogrResult.end(),
 			[](const OGRPoint& a, const OGRPoint& b)
 			{
 				return abs(a.getX() - b.getX()) < 1e-6 && abs(a.getY() - b.getY()) < 1e-6;
@@ -629,7 +629,7 @@ static bool ReadImagePixels(const string& imagePath, vector<uint8_t>& rBuffer, v
 	return true;
 }
 
-bool TileSplice(const std::vector<TileInfo>& tiles, string& resultImagePath)
+bool TileSplice(const vector<TileInfo>& tiles, string& resultImagePath)
 {
 	if (tiles.empty())
 	{

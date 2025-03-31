@@ -270,7 +270,7 @@ bool GetCapabilities(const string& url, string& content, string& receiveInfo, co
 	return true;
 }
 
-bool DownloadImage(const std::string& url, const std::string& filePath, std::string& receiveInfo, const std::string& proxyUrl, const std::string& proxyUserName, const std::string& proxyPassword)
+bool DownloadImage(const string& url, const string& filePath, string& receiveInfo, const string& proxyUrl, const string& proxyUserName, const string& proxyPassword)
 {
 	receiveInfo = "";
 
@@ -383,9 +383,9 @@ bool DownloadImage(const std::string& url, const std::string& filePath, std::str
 	return true;
 }
 
-bool DownloadAttempt(const std::string& url, const std::string& filePath, std::string& receiveInfo,
-	const std::string& proxyUrl, const std::string& proxyUserName,
-	const std::string& proxyPassword, bool useProxy, CURLcode& outCode)
+bool DownloadAttempt(const string& url, const string& filePath, string& receiveInfo,
+	const string& proxyUrl, const string& proxyUserName,
+	const string& proxyPassword, bool useProxy, CURLcode& outCode)
 {
 	CURLM* multiHandle = curl_multi_init();
 	if (!multiHandle)
@@ -450,7 +450,7 @@ bool DownloadAttempt(const std::string& url, const std::string& filePath, std::s
 			{
 				success = false;
 				outCode = msg->data.result;
-				receiveInfo = "Download failed: " + std::string(curl_easy_strerror(outCode));
+				receiveInfo = "Download failed: " + string(curl_easy_strerror(outCode));
 			}
 		}
 	}
@@ -488,9 +488,9 @@ bool DownloadAttempt(const std::string& url, const std::string& filePath, std::s
 	return true;
 }
 
-bool DownloadImageMultiThread(const std::string& url, const std::string& filePath, std::string& receiveInfo,
-	const std::string& proxyUrl, const std::string& proxyUserName,
-	const std::string& proxyPassword)
+bool DownloadImageMultiThread(const string& url, const string& filePath, string& receiveInfo,
+	const string& proxyUrl, const string& proxyUserName,
+	const string& proxyPassword)
 {
 	if (url.empty())
 	{
