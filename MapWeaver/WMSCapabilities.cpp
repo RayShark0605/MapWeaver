@@ -2,6 +2,7 @@
 #include "Network.h"
 #include <unordered_set>
 #include <iomanip>
+#include <regex>
 using namespace std;
 
 namespace internal
@@ -1016,9 +1017,8 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 		if (supportedCRSNode)
 		{
 			const string supportedCRSString = supportedCRSNode->GetText();
-
 			OGRSpatialReference crs;
-			if (crs.SetFromUserInput(supportedCRSString.c_str()) == OGRERR_NONE)
+			if (SetCRS(supportedCRSString, crs))
 			{
 				const char* authName = crs.GetAuthorityName(nullptr);
 				const char* authCode = crs.GetAuthorityCode(nullptr);
@@ -1030,8 +1030,8 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 				const double metersPerUnit = (crs.IsGeographic() ? 111319.49079327358 : crs.GetLinearUnits());
 				const bool isAxisInverted = crs.EPSGTreatsAsLatLong() || crs.EPSGTreatsAsNorthingEasting();
 
-				for (TiXmlElement* tileMatrixNode = curNode->FirstChildElement("TileMatrix"); 
-					tileMatrixNode; 
+				for (TiXmlElement* tileMatrixNode = curNode->FirstChildElement("TileMatrix");
+					tileMatrixNode;
 					tileMatrixNode = tileMatrixNode->NextSiblingElement("TileMatrix"))
 				{
 					WMTSTileMatrix tileMatrix;
@@ -1070,6 +1070,10 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 						{
 							tileMatrix.topLeft.x = (isAxisInverted ? stod(topLeftString[1]) : stod(topLeftString[0]));
 							tileMatrix.topLeft.y = (isAxisInverted ? stod(topLeftString[0]) : stod(topLeftString[1]));
+							if (IsTianDiTu())
+							{
+								swap(tileMatrix.topLeft.x, tileMatrix.topLeft.y);
+							}
 						}
 					}
 
@@ -1097,8 +1101,14 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 						tileMatrix.matrixHeight = stoi(matrixHeightNode->GetText());
 					}
 
-					
-					tileMatrix.pixelSize = tileMatrix.scaleDenominator * 0.00028 / metersPerUnit;
+					if (IsTianDiTu())
+					{
+						tileMatrix.pixelSize = tileMatrix.scaleDenominator * 0.0254 / 96 / metersPerUnit;
+					}
+					else
+					{
+						tileMatrix.pixelSize = tileMatrix.scaleDenominator * 0.00028 / metersPerUnit;
+					}
 
 					matrixSet.tileMatrices[tileMatrix.pixelSize] = tileMatrix;
 				}
@@ -1505,7 +1515,8 @@ bool WMSCapabilitiesWorker::DetectTileLayerBoundingBox(WMTSTileLayer& tileLayer)
 
 		const WMTSTileMatrix& tileMatrix = tileMatrixIt->second;
 		const double metersPerUnit = (crs.IsGeographic() ? 111319.49079327358 : crs.GetLinearUnits());
-		const double pixelSize = tileMatrix.scaleDenominator * 0.00028 / metersPerUnit;
+
+		const double pixelSize = (IsTianDiTu() ? tileMatrix.scaleDenominator * 0.0254 / 96 / metersPerUnit : tileMatrix.scaleDenominator * 0.00028 / metersPerUnit);
 
 		const Point2d bottomRight(tileMatrix.topLeft.x + pixelSize * tileMatrix.tileWidth * tileMatrix.matrixWidth,
 			tileMatrix.topLeft.y - pixelSize * tileMatrix.tileHeight * tileMatrix.matrixHeight);
@@ -1611,20 +1622,34 @@ bool WMSCapabilitiesWorker::ParseCapabilities(const string& content, string& err
 		curNode = curNode->NextSiblingElement();
 	}
 
+	if (!layerParents.empty())
+	{
+		layerTrees = LayerTree::GenerateLayerTree(layerParents);
+	}
+
 	return true;
 }
 
-vector<string> WMSCapabilitiesWorker::GetAllLayerTitle() const
+vector<string> WMSCapabilitiesWorker::GetRootLayerTitles() const
 {
 	vector<string> result;
-	for (const WMSLayer& layer : layers)
+
+	for (const LayerTree& root : layerTrees)
 	{
-		result.push_back(layer.title);
+		const int rootID = root.rootOrderID;
+		string rootTitle = "";
+		if (GetLayerTitleByID(rootID, rootTitle))
+		{
+			result.push_back(rootTitle);
+		}
 	}
+
 	for (const WMTSTileLayer& layer : tileLayers)
 	{
 		result.push_back(layer.title);
 	}
+
+	sort(result.begin(), result.end());
 	return result;
 }
 
@@ -1763,6 +1788,20 @@ TileMatrixLimits WMSCapabilitiesWorker::GetTileMatrixLimits(const string& layerT
 		break;
 	}
 	return result;
+}
+
+string WMSCapabilitiesWorker::ExtractToken(const string& url) const
+{
+	string result = "";
+	if (URLProcessing::HasQueryParam(url, "token", result))
+	{
+		return result;
+	}
+	if (URLProcessing::HasQueryParam(url, "tk", result))
+	{
+		return result;
+	}
+	return "";
 }
 
 vector<TileInfo> WMSCapabilitiesWorker::CalculateTilesInfo(const string& layerTitle, const string& tileMatrixSetName, const string& format, const string& style, const BoundingBox& viewExtent, const string& url) const
@@ -1924,6 +1963,12 @@ vector<string> WMSCapabilitiesWorker::GetLayerFormats(const string& layerTitle) 
 				result.push_back(legendUrl.format);
 			}
 		}
+
+		// 在layer中没找到format，则在getMap中继续找
+		if (result.empty())
+		{
+			result = capabilities.capability.request.getMap.format;
+		}
 		return result;
 	}
 
@@ -1970,6 +2015,68 @@ vector<string> WMSCapabilitiesWorker::GetLayerStyles(const string& layerTitle) c
 		}
 
 		return result;
+	}
+
+	return {};
+}
+
+bool WMSCapabilitiesWorker::IsTianDiTu() const
+{
+	if (capabilities.capability.request.getTile.dcpType.size() == 1)
+	{
+		const string url = capabilities.capability.request.getTile.dcpType[0].get;
+		if (internal::ToLower(url).find("tianditu") != string::npos)
+		{
+			return true;
+		}
+		return false;
+	}
+	return false;
+}
+
+bool WMSCapabilitiesWorker::GetLayerTitleByID(int layerID, string& layerTitle) const
+{
+	for (const WMSLayer& layer : layers)
+	{
+		if (layer.orderID == layerID)
+		{
+			layerTitle = layer.title;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool WMSCapabilitiesWorker::GetLayerIDByTitle(const string& layerTitle, int& layerID) const
+{
+	for (const WMSLayer& layer : layers)
+	{
+		if (layer.title == layerTitle)
+		{
+			layerID = layer.orderID;
+			return true;
+		}
+	}
+	return false;
+}
+
+vector<string> WMSCapabilitiesWorker::GetChildrenLayerTitles(const string& layerTitle) const
+{
+	for (const WMSLayer& layer : layers)
+	{
+		if (layer.title != layerTitle)
+		{
+			continue;
+		}
+
+		vector<string> childrenLayerTitles;
+		for (const WMSLayer& subLayer : layer.layer)
+		{
+			childrenLayerTitles.push_back(subLayer.title);
+		}
+
+		sort(childrenLayerTitles.begin(), childrenLayerTitles.end());
+		return childrenLayerTitles;
 	}
 
 	return {};
@@ -2043,7 +2150,6 @@ int WMSCapabilitiesWorker::CalculateLevel(const string& layerTitle, const string
 					result = -1;
 				}
 
-
 				if (result < 0 || result > 25) // level范围[0, 25]
 				{
 					result = -1;
@@ -2065,7 +2171,10 @@ string WMSCapabilitiesWorker::CreateWMTSGetTileUrl(const string& url, const Tile
 		URLProcessing::AddQueryParam(requestUrl, "REQUEST", "GetTile");
 		URLProcessing::AddQueryParam(requestUrl, "VERSION", capabilities.version);
 		URLProcessing::AddQueryParam(requestUrl, "LAYER", EscapeString(tileInfo.layerName));
-		URLProcessing::AddQueryParam(requestUrl, "STYLE", EscapeString(tileInfo.style));
+		if (!tileInfo.style.empty())
+		{
+			URLProcessing::AddQueryParam(requestUrl, "STYLE", EscapeString(tileInfo.style));
+		}
 		URLProcessing::AddQueryParam(requestUrl, "FORMAT", EscapeString(tileInfo.format));
 		URLProcessing::AddQueryParam(requestUrl, "TILEMATRIXSET", EscapeString(tileInfo.tileMatrixSet));
 		
@@ -2074,6 +2183,11 @@ string WMSCapabilitiesWorker::CreateWMTSGetTileUrl(const string& url, const Tile
 		URLProcessing::AddQueryParam(requestUrl, "TILEROW", to_string(tileInfo.row));
 		URLProcessing::AddQueryParam(requestUrl, "TILECOL", to_string(tileInfo.col));
 
+		const string token = ExtractToken(url);
+		if (!token.empty())
+		{
+			URLProcessing::AddQueryParam(requestUrl, "tk", token);
+		}
 		return requestUrl;
 	}
 
@@ -2133,7 +2247,10 @@ string WMSCapabilitiesWorker::CreateWMSGetTileUrl(const string& url, const TileI
 	URLProcessing::AddQueryParam(requestUrl, "WIDTH", to_string(tileInfo.numWidthPixels));
 	URLProcessing::AddQueryParam(requestUrl, "HEIGHT", to_string(tileInfo.numHeightPixels));
 	URLProcessing::AddQueryParam(requestUrl, "LAYERS", EscapeString(tileInfo.layerName));
-	URLProcessing::AddQueryParam(requestUrl, "STYLES", EscapeString(tileInfo.style));
+	if (!tileInfo.style.empty())
+	{
+		URLProcessing::AddQueryParam(requestUrl, "STYLES", EscapeString(tileInfo.style));
+	}
 	URLProcessing::AddQueryParam(requestUrl, "FORMAT", EscapeString(tileInfo.format));
 
 	URLProcessing::AddQueryParam(requestUrl, "DPI", to_string(dpi));
@@ -2239,13 +2356,48 @@ string WMSCapabilitiesWorker::GetTileMatrixName(const string& layerTitle, const 
 			{
 				tileMatrixName = tileMatrixName.substr(lastColonPos + 1);
 			}
-			if (tileMatrixName == to_string(level))
+			if (tileMatrixName == to_string(level) || tileMatrixName == "0" + to_string(level))
 			{
 				return pair2.second.identifier;
 			}
 		}
 	}
 	return "";
+}
+
+bool WMSCapabilitiesWorker::SetCRS(const std::string& crsString, OGRSpatialReference& crs) const
+{
+	if (crs.SetFromUserInput(crsString.c_str()) == OGRERR_NONE)
+	{
+		const char* authName = crs.GetAuthorityName(nullptr);
+		const char* authCode = crs.GetAuthorityCode(nullptr);
+		if (authName && authCode)
+		{
+			return true;
+		}
+	}
+
+	// 对于类似"urn:ogc:def:crs:EPSG:6.18:3:3857"的输入字符串
+	if (crsString._Starts_with("urn:ogc:def") && internal::ToLower(crsString).find("epsg") != string::npos)
+	{
+		const vector<string> parts = SplitString(crsString, ':');
+		const regex pattern("^[1-9]\\d*$");
+		if (!parts.empty() && regex_match(parts.back(), pattern))
+		{
+			const string epsgCode = "EPSG:" + parts.back();
+			if (crs.SetFromUserInput(epsgCode.c_str()) == OGRERR_NONE)
+			{
+				const char* authName = crs.GetAuthorityName(nullptr);
+				const char* authCode = crs.GetAuthorityCode(nullptr);
+				if (authName && authCode)
+				{
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
 }
 
 bool TileInfo::IsValid() const

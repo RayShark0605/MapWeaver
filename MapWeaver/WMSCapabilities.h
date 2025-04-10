@@ -82,7 +82,7 @@ public:
 	bool ParseCapabilities(const std::string& content, std::string& errorInfo); 
 
 	// 获取WMS图层和WMTS图层的所有图层标题
-	std::vector<std::string> GetAllLayerTitle() const;
+	std::vector<std::string> GetRootLayerTitles() const;
 
 	// 根据图层名（title）获取该图层的所有TileMatrixSets，WMTS图层才有
 	std::vector<std::string> GetLayerAllTileMatrixSets(const std::string& layerTitle) const;
@@ -99,6 +99,9 @@ public:
 	// 根据图层名（title）、TileMatrixSet名和level等级获取该瓦片矩阵的行列号限制
 	TileMatrixLimits GetTileMatrixLimits(const std::string& layerTitle, const std::string& tileMatrixSetName, int level) const;
 
+	// 提取token
+	std::string ExtractToken(const std::string& url) const;
+
 	// 根据指定图层名（title）和包络盒计算所需的瓦片信息
 	std::vector<TileInfo> CalculateTilesInfo(const std::string& layerTitle, const std::string& tileMatrixSetName, const std::string& format, const std::string& style, const BoundingBox& viewExtent, const std::string& url) const;
 
@@ -114,10 +117,23 @@ public:
 	// 根据图层名（title）获取它包含的所有风格
 	std::vector<std::string> GetLayerStyles(const std::string& layerTitle) const;
 
+	// 是否是天地图
+	bool IsTianDiTu() const;
+
+	// 根据图层ID获取图层标题。仅对WMS图层
+	bool GetLayerTitleByID(int layerID, std::string& layerTitle) const;
+
+	// 根据图层标题获取图层ID。仅对WMS图层
+	bool GetLayerIDByTitle(const std::string& layerTitle, int& layerID) const;
+
+	// 获取子图层标题。仅对WMS图层
+	std::vector<std::string> GetChildrenLayerTitles(const std::string& layerTitle) const;
+
 private:
 	int numLayers = -1;
 	std::unordered_map<int, int> layerParents; // 每个layer的父layer ID
 	std::unordered_map<int, std::vector<std::string>> layerParentNames;
+	std::vector<LayerTree> layerTrees;
 
 	std::unordered_map<std::string, bool> layerQueryable;
 	
@@ -165,4 +181,6 @@ private:
 
 	// 获取原瓦片矩阵名
 	std::string GetTileMatrixName(const std::string& layerTitle, const std::string& tileMatrixSetName, int level) const;
+
+	bool SetCRS(const std::string& crsString, OGRSpatialReference& crs) const;
 };

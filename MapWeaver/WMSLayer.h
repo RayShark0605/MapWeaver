@@ -172,4 +172,18 @@ struct WMTSTileMatrixSet
 	const WMTSTileMatrix* GetTileMatrix(const std::string& identifier) const;
 };
 
+struct LayerTree
+{
+	int rootOrderID = -1;
+	std::vector<LayerTree> subLayers;
+
+	LayerTree();
+	LayerTree(int rootOrderID);
+
+	// layerParents表示每个layer的父layer ID
+	static std::vector<LayerTree> GenerateLayerTree(const std::unordered_map<int, int>& layerParents);
+
+	void SortRecursive();
+};
+
 

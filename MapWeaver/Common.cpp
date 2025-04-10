@@ -279,7 +279,7 @@ string URLProcessing::GetRequestBaseUrl(const string& url)
 	{
 		return url;
 	}
-	return url.substr(0, questionMarkPos + 1);
+	return url.substr(0, questionMarkPos);
 }
 
 void URLProcessing::ReplaceQueryParam(string& url, const string& key, const string& value, bool isCaseSensitive)
@@ -321,11 +321,18 @@ void URLProcessing::ReplaceQueryParam(string& url, const string& key, const stri
 	}
 }
 
-vector<string> SplitString(const string& input)
+vector<string> SplitString(const string& input, char delimiter)
 {
-	istringstream iss(input);
 	vector<string> tokens;
-	copy(istream_iterator<string>(iss), istream_iterator<string>(), back_inserter(tokens));
+	istringstream iss(input);
+	string token;
+	while (getline(iss, token, delimiter))
+	{
+		if (!token.empty())
+		{
+			tokens.push_back(token);
+		}
+	}
 	return tokens;
 }
 
@@ -756,6 +763,7 @@ bool ReprojectImage(const string& imagePath, const string& targetCRS, string& re
 		return false;
 	}
 
+	GDALAllRegister();
 	GDALDataset* image = (GDALDataset*)GDALOpen(imagePath.c_str(), GA_ReadOnly);
 	if (!image)
 	{
@@ -786,6 +794,157 @@ bool ReprojectImage(const string& imagePath, const string& targetCRS, string& re
 	return true;
 }
 
+bool ReprojectImage(const string& imagePath, const string& sourceCRS, const string& targetCRS, string& resultImagePath)
+{
+	OGRSpatialReference crs1, crs2;
+	if (crs1.SetFromUserInput(sourceCRS.c_str()) != OGRERR_NONE)
+	{
+		return false;
+	}
+	char* sourceWKT = nullptr; // 记得使用CPLFree(wkt);释放
+	if (crs1.exportToWkt(&sourceWKT) != OGRERR_NONE || !sourceWKT)
+	{
+		return false;
+	}
+
+	if (crs2.SetFromUserInput(targetCRS.c_str()) != OGRERR_NONE)
+	{
+		CPLFree(sourceWKT);
+		return false;
+	}
+	char* targetWKT = nullptr; // 记得使用CPLFree(wkt);释放
+	if (crs2.exportToWkt(&targetWKT) != OGRERR_NONE || !targetWKT)
+	{
+		CPLFree(sourceWKT);
+		return false;
+	}
+
+	GDALAllRegister();
+	GDALDataset* image = (GDALDataset*)GDALOpen(imagePath.c_str(), GA_ReadOnly);
+	if (!image)
+	{
+		CPLFree(sourceWKT);
+		CPLFree(targetWKT);
+		return false;
+	}
+
+	GDALDriver* tiffDriver = GetGDALDriverManager()->GetDriverByName("GTiff");
+	if (!tiffDriver)
+	{
+		CPLFree(sourceWKT);
+		CPLFree(targetWKT);
+		GDALClose(image);
+		return false;
+	}
+
+	const string targetImagePath = GetDir(imagePath) + "/" + GetFileName(imagePath) + "_reproj.tiff";
+	if (GDALCreateAndReprojectImage(image, sourceWKT, targetImagePath.c_str(), targetWKT, tiffDriver,
+		nullptr, GRA_NearestNeighbour, 0, 0.5, nullptr, nullptr, nullptr) != CPLErr::CE_None)
+	{
+		CPLFree(sourceWKT);
+		CPLFree(targetWKT);
+		GDALClose(image);
+		return false;
+	}
+
+	CPLFree(sourceWKT);
+	CPLFree(targetWKT);
+	GDALClose(image);
+	resultImagePath = targetImagePath;
+	return true;
+}
+
+bool ReprojectTile(const TileInfo& tile, const string& targetCRS, string& resultImagePath)
+{
+	OGRSpatialReference crs1, crs2;
+	if (crs1.SetFromUserInput(tile.bbox.crs.c_str()) != OGRERR_NONE)
+	{
+		return false;
+	}
+	char* sourceWKT = nullptr; // 记得使用CPLFree(wkt);释放
+	if (crs1.exportToWkt(&sourceWKT) != OGRERR_NONE || !sourceWKT)
+	{
+		return false;
+	}
+
+	if (crs2.SetFromUserInput(targetCRS.c_str()) != OGRERR_NONE)
+	{
+		CPLFree(sourceWKT);
+		return false;
+	}
+	char* targetWKT = nullptr; // 记得使用CPLFree(wkt);释放
+	if (crs2.exportToWkt(&targetWKT) != OGRERR_NONE || !targetWKT)
+	{
+		CPLFree(sourceWKT);
+		return false;
+	}
+
+	GDALDataset* image = nullptr;
+	try
+	{
+		image = (GDALDataset*)GDALOpen(tile.filePath.c_str(), GA_ReadOnly);
+	}
+	catch (const exception& e)
+	{
+		CPLFree(sourceWKT);
+		CPLFree(targetWKT);
+		return false;
+	}
+	
+	if (!image)
+	{
+		CPLFree(sourceWKT);
+		CPLFree(targetWKT);
+		return false;
+	}
+	if (image->SetProjection(sourceWKT) != CPLErr::CE_None)
+	{
+		CPLFree(sourceWKT);
+		CPLFree(targetWKT);
+		GDALClose(image);
+		return false;
+	}
+
+	const double resolutionX = tile.bbox.bbox.GetWidth() / tile.numWidthPixels;
+	const double resolutionY = tile.bbox.bbox.GetHeight() / tile.numHeightPixels;
+	const Point2d imageLeftTop(tile.bbox.bbox.GetMinPoint().x, tile.bbox.bbox.GetMaxPoint().y);
+	vector<double> transform = {
+		imageLeftTop.x, resolutionX, 0,
+		imageLeftTop.y, 0, -resolutionY
+	};
+	if (image->SetGeoTransform(transform.data()) != CPLErr::CE_None)
+	{
+		CPLFree(sourceWKT);
+		CPLFree(targetWKT);
+		GDALClose(image);
+		return false;
+	}
+
+	GDALDriver* tiffDriver = GetGDALDriverManager()->GetDriverByName("GTiff");
+	if (!tiffDriver)
+	{
+		CPLFree(sourceWKT);
+		CPLFree(targetWKT);
+		GDALClose(image);
+		return false;
+	}
+
+	const string targetImagePath = GetDir(tile.filePath) + "/" + GetFileName(tile.filePath) + "_reproj.tiff";
+	if (GDALCreateAndReprojectImage(image, sourceWKT, targetImagePath.c_str(), targetWKT, tiffDriver,
+		nullptr, GRA_NearestNeighbour, 0, 0.5, nullptr, nullptr, nullptr) != CPLErr::CE_None)
+	{
+		CPLFree(sourceWKT);
+		CPLFree(targetWKT);
+		GDALClose(image);
+		return false;
+	}
+
+	CPLFree(sourceWKT);
+	CPLFree(targetWKT);
+	GDALClose(image);
+	resultImagePath = targetImagePath;
+	return true;
+}
 
 unordered_map<string, bool> CSConverter::crsInvertAxisCache;
 void CSConverter::Initial(const string& GDALSharePath)

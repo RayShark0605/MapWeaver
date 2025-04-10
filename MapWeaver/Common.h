@@ -119,8 +119,8 @@ private:
 	static std::unordered_map<std::string, bool> crsInvertAxisCache;
 };
 
-// 将字符串按照空白字符分割成多个子串
-std::vector<std::string> SplitString(const std::string& input);
+// 将字符串分割成多个子串
+std::vector<std::string> SplitString(const std::string& input, char delimiter = ' ');
 
 // 获取指定坐标系范围在EPSG:4326下的包络盒
 BoundingBox GetCSBoundingBox4326(const std::string& epsgCode);
@@ -135,5 +135,8 @@ std::vector<Point2d> GetIntersectionVertices(const std::vector<Point2d>& points1
 struct TileInfo;
 bool TileSplice(const std::vector<TileInfo>& tiles, std::string& resultImagePath);
 
-// 图像重投影
+// 图像重投影，需要确保imagePath的影像是包含坐标系信息的GeoTIFF格式
 bool ReprojectImage(const std::string& imagePath, const std::string& targetCRS, std::string& resultImagePath);
+
+// 瓦片重投影
+bool ReprojectTile(const TileInfo& tile, const std::string& targetCRS, std::string& resultImagePath);

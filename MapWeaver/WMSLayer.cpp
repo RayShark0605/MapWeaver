@@ -1,4 +1,5 @@
 #include "WMSLayer.h"
+#include <unordered_set>
 
 using namespace std;
 
@@ -123,7 +124,7 @@ const WMTSTileMatrix* WMTSTileMatrixSet::GetTileMatrix(const string& identifier)
 		{
 			levelIDString = levelIDString.substr(lastColonPos + 1);
 		}
-		if (levelIDString == identifier)
+		if (levelIDString == identifier || levelIDString == "0" + identifier) // АэИз"01"
 		{
 			return &tileMatrix.second;
 		}
@@ -140,3 +141,80 @@ bool WMTSTileLayer::TileMatrixSetLink::TileMatrixLimits::IsValid(int level) cons
 {
 	return tileMatrix == to_string(level) && minTileRow >= 0 && maxTileRow >= 0 && minTileCol >= 0 && maxTileCol >= 0 && minTileRow <= maxTileRow && minTileCol <= maxTileCol;
 }
+
+LayerTree::LayerTree() :rootOrderID(-1)
+{
+	subLayers.clear();
+}
+
+LayerTree::LayerTree(int rootOrderID) : rootOrderID(rootOrderID)
+{
+	subLayers.clear();
+}
+
+
+vector<LayerTree> LayerTree::GenerateLayerTree(const unordered_map<int, int>& layerParents)
+{
+	unordered_map<int, unique_ptr<LayerTree>> nodeMap;
+	unordered_set<int> children;
+	int maxNodeID = -1;
+
+	for (const auto& [child, parent] : layerParents)
+	{
+		if (!nodeMap.count(child))
+		{
+			nodeMap[child] = make_unique<LayerTree>(child);
+		}
+		if (!nodeMap.count(parent))
+		{
+			nodeMap[parent] = make_unique<LayerTree>(parent);
+		}
+		maxNodeID = max(child, maxNodeID);
+
+		nodeMap[parent]->subLayers.push_back(*nodeMap[child]);
+		children.insert(child);
+	}
+
+	vector<LayerTree> roots;
+	for (const auto& [id, node] : nodeMap)
+	{
+		if (!children.count(id))
+		{
+			roots.push_back(*node);
+		}
+	}
+
+	for (int id = 0; id <= maxNodeID; id++)
+	{
+		if (!layerParents.count(id) &&
+			!any_of(roots.begin(), roots.end(), [id](const LayerTree& node) { return node.rootOrderID == id; }))
+		{
+			roots.push_back(LayerTree(id));
+		}
+	}
+
+	for (auto& root : roots)
+	{
+		root.SortRecursive();
+	}
+
+	sort(roots.begin(), roots.end(), [](const LayerTree& a, const LayerTree& b) {
+		return a.rootOrderID < b.rootOrderID;
+		});
+
+	return roots;
+}
+
+void LayerTree::SortRecursive()
+{
+	sort(subLayers.begin(), subLayers.end(), [](const LayerTree& a, const LayerTree& b) {
+		return a.rootOrderID < b.rootOrderID;
+		});
+
+	for (auto& sub : subLayers)
+	{
+		sub.SortRecursive();
+	}
+}
+
+
