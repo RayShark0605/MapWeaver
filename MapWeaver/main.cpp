@@ -381,12 +381,12 @@ int main(int argc, char *argv[])
             }
             break;
         }
-        const string proxyUrl = "http://127.0.0.1:10808";
+        const string proxyUrl = "http://127.0.0.1:10808", proxyUserName = "", proxyPassword = "";
 
         // 下载XML
         auto start = chrono::high_resolution_clock::now();
         string content = "", errorInfo = "";
-        const bool downloadSuccess = WMSCapabilitiesDownloader::DownloadCapabilitiesXML(url, content, errorInfo, proxyUrl);
+        const bool downloadSuccess = WMSCapabilitiesDownloader::DownloadCapabilitiesXML(url, content, errorInfo, proxyUrl, proxyUserName, proxyPassword);
         auto end = chrono::high_resolution_clock::now();
         auto duration = chrono::duration_cast<chrono::milliseconds>(end - start);
         cout << "下载XML耗时：" << duration.count() << " 毫秒" << endl;
@@ -475,7 +475,7 @@ int main(int argc, char *argv[])
 
         // 下载和重投影瓦片
         start = chrono::high_resolution_clock::now();
-        ThreadPool pool(8);
+        ThreadPool pool(1);
         vector<string> errorInfos(tiles.size());
         vector<string> resultTilesPath(tiles.size());
         for (size_t i = 0; i < tiles.size(); i++)
@@ -488,38 +488,38 @@ int main(int argc, char *argv[])
         cout << "下载和重投影完毕！耗时：" << duration.count() << " 毫秒" << endl;
 
 
-        //// 瓦片拼接
-        //string spliceImagePath = "";
-        //start = chrono::high_resolution_clock::now();
-        //GDALAllRegister();
-        //bool result = TileSplice(tiles, spliceImagePath);
-        //end = chrono::high_resolution_clock::now();
-        //duration = chrono::duration_cast<chrono::milliseconds>(end - start);
-        //if (result)
-        //{
-        //    cout << "瓦片拼接成功！耗时：" << duration.count() << " 毫秒" << endl;
-        //}
-        //else
-        //{
-        //    cout << "瓦片拼接失败！耗时：" << duration.count() << " 毫秒" << endl;
-        //    continue;
-        //}
+        // 瓦片拼接
+        string spliceImagePath = "";
+        start = chrono::high_resolution_clock::now();
+        GDALAllRegister();
+        bool result = TileSplice(tiles, spliceImagePath);
+        end = chrono::high_resolution_clock::now();
+        duration = chrono::duration_cast<chrono::milliseconds>(end - start);
+        if (result)
+        {
+            cout << "瓦片拼接成功！耗时：" << duration.count() << " 毫秒" << endl;
+        }
+        else
+        {
+            cout << "瓦片拼接失败！耗时：" << duration.count() << " 毫秒" << endl;
+            continue;
+        }
 
-        //// 拼接影像重投影到geoCRS
-        //string reprojectImagePath = "";
-        //start = chrono::high_resolution_clock::now();
-        //result = ReprojectImage(spliceImagePath, geoCRS, reprojectImagePath);
-        //end = chrono::high_resolution_clock::now();
-        //duration = chrono::duration_cast<chrono::milliseconds>(end - start);
-        //if (result)
-        //{
-        //    cout << "重投影成功！耗时：" << duration.count() << " 毫秒" << endl;
-        //}
-        //else
-        //{
-        //    cout << "重投影失败！耗时：" << duration.count() << " 毫秒" << endl;
-        //    continue;
-        //}
+        // 拼接影像重投影到geoCRS
+        string reprojectImagePath = "";
+        start = chrono::high_resolution_clock::now();
+        result = ReprojectImage(spliceImagePath, geoCRS, reprojectImagePath);
+        end = chrono::high_resolution_clock::now();
+        duration = chrono::duration_cast<chrono::milliseconds>(end - start);
+        if (result)
+        {
+            cout << "重投影成功！耗时：" << duration.count() << " 毫秒" << endl;
+        }
+        else
+        {
+            cout << "重投影失败！耗时：" << duration.count() << " 毫秒" << endl;
+            continue;
+        }
     }
     return 0;
 }

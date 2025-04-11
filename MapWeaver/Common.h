@@ -110,7 +110,7 @@ public:
 	static bool TransformPoints(const std::string& srcEPSGCode, const std::vector<Point2d>& srcPts, const std::string& destEPSGCode, std::vector<Point2d>& destPts, std::vector<int>& successFlag);
 
 	// 转换BoundingBox
-	static bool TransformBoundingBox(const BoundingBox& srcBoundingBox, BoundingBox& destBoundingBox);
+	static bool TransformBoundingBox(const BoundingBox& srcBoundingBox, BoundingBox& destBoundingBox, bool isRestrictedArea = true);
 
 	// 判断是否需要反转坐标轴. WMS 1.3.0标准规定, 某些CRS的轴顺序是纬度优先(Lat, Lon), 而不是经度优先(Lon, Lat)
 	static bool ShouldInvertAxisOrientation(const std::string& EPSGCode);
@@ -124,6 +124,9 @@ std::vector<std::string> SplitString(const std::string& input, char delimiter = 
 
 // 获取指定坐标系范围在EPSG:4326下的包络盒
 BoundingBox GetCSBoundingBox4326(const std::string& epsgCode);
+
+// 获取指定坐标系范围在指定坐标系下的包络盒
+BoundingBox GetCSBoundingBox(const std::string& epsgCode);
 
 // 获取两个包络盒的重叠部分
 BoundingBox GetBoundingBoxOverlap(const BoundingBox& bbox1, const BoundingBox& bbox2);

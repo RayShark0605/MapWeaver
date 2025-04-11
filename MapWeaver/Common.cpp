@@ -363,6 +363,34 @@ BoundingBox GetCSBoundingBox4326(const string& epsgCode)
 	return result;
 }
 
+BoundingBox GetCSBoundingBox(const string& epsgCode)
+{
+	BoundingBox result;
+
+	OGRSpatialReference crs;
+	if (crs.SetFromUserInput(epsgCode.c_str()) != OGRERR_NONE)
+	{
+		return result;
+	}
+	const char* authName = crs.GetAuthorityName(nullptr);
+	const char* authCode = crs.GetAuthorityCode(nullptr);
+	if (!authName || !authCode)
+	{
+		return result;
+	}
+
+	const char* areaName = nullptr;
+	double minX = 0, minY = 0, maxX = 0, maxY = 0;
+	if (!crs.GetAreaOfUse(&minX, &minY, &maxX, &maxY, &areaName))
+	{
+		return result;
+	}
+
+	result.crs = string(authName) + ":" + string(authCode);
+	result.bbox = Rectangle(minX, minY, maxX, maxY);
+	return result;
+}
+
 BoundingBox GetBoundingBoxOverlap(const BoundingBox& bbox1, const BoundingBox& bbox2)
 {
 	BoundingBox result;
@@ -723,8 +751,8 @@ bool TileSplice(const vector<TileInfo>& tiles, string& resultImagePath)
 	image->GetRasterBand(3)->RasterIO(GF_Write, 0, 0, tileMatrixWidth, tileMatrixHeight, bBuffer.data(), tileMatrixWidth, tileMatrixHeight, GDT_Byte, 0, 0);
 	image->GetRasterBand(4)->RasterIO(GF_Write, 0, 0, tileMatrixWidth, tileMatrixHeight, aBuffer.data(), tileMatrixWidth, tileMatrixHeight, GDT_Byte, 0, 0);
 
-	const double resolutionX = tiles[0].bbox.bbox.GetWidth() / tileMatrixWidth;
-	const double resolutionY = tiles[0].bbox.bbox.GetHeight() / tileMatrixHeight;
+	const double resolutionX = tiles[0].bbox.bbox.GetWidth() / tiles[0].numWidthPixels;
+	const double resolutionY = tiles[0].bbox.bbox.GetHeight() / tiles[0].numHeightPixels;
 	const Point2d imageLeftTop(tiles[0].bbox.bbox.GetMinPoint().x, tiles[0].bbox.bbox.GetMaxPoint().y);
 	vector<double> transform = {
 		imageLeftTop.x, resolutionX, 0,
@@ -931,7 +959,7 @@ bool ReprojectTile(const TileInfo& tile, const string& targetCRS, string& result
 
 	const string targetImagePath = GetDir(tile.filePath) + "/" + GetFileName(tile.filePath) + "_reproj.tiff";
 	if (GDALCreateAndReprojectImage(image, sourceWKT, targetImagePath.c_str(), targetWKT, tiffDriver,
-		nullptr, GRA_NearestNeighbour, 0, 0.5, nullptr, nullptr, nullptr) != CPLErr::CE_None)
+		nullptr, GRA_NearestNeighbour, 0, 0, nullptr, nullptr, nullptr) != CPLErr::CE_None)
 	{
 		CPLFree(sourceWKT);
 		CPLFree(targetWKT);
@@ -1040,7 +1068,7 @@ bool CSConverter::TransformPoints(const string& srcEPSGCode, const vector<Point2
 	return all_of(successFlag.begin(), successFlag.end(), [](int value) { return value == 1; });
 }
 
-bool CSConverter::TransformBoundingBox(const BoundingBox& srcBoundingBox, BoundingBox& destBoundingBox)
+bool CSConverter::TransformBoundingBox(const BoundingBox& srcBoundingBox, BoundingBox& destBoundingBox, bool isRestrictedArea)
 {
 	const Point2d srcP1 = srcBoundingBox.bbox.GetMinPoint();
 	const Point2d srcP2 = srcBoundingBox.bbox.GetMaxPoint();
@@ -1071,6 +1099,19 @@ bool CSConverter::TransformBoundingBox(const BoundingBox& srcBoundingBox, Boundi
 	const double maxY = max({ destP1.y, destP2.y, destP3.y, destP4.y });
 
 	destBoundingBox.bbox = Rectangle(minX, minY, maxX, maxY);
+	if (destBoundingBox.crs == "EPSG:4326" || !isRestrictedArea)
+	{
+		return true;
+	}
+
+	// 确保转换后的bbox不能超过其坐标系的最大范围
+	const BoundingBox destCRSMaxBBox4326 = GetCSBoundingBox4326(destBoundingBox.crs);
+	BoundingBox destCRSMaxBBox(destBoundingBox.crs, Rectangle());
+	if (!TransformBoundingBox(destCRSMaxBBox4326, destCRSMaxBBox, false))
+	{
+		return false;
+	}
+	destBoundingBox = GetBoundingBoxOverlap(destBoundingBox, destCRSMaxBBox);
 	return true;
 }
 
