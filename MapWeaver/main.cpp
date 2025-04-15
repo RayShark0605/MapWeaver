@@ -361,7 +361,6 @@ bool DownloadAndReprojectTile(const TileInfo& tile, const string& targetCRS, str
     return true;
 }
 
-
 int main(int argc, char *argv[])
 {
     GDALAllRegister();

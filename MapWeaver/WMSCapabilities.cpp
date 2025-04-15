@@ -5,6 +5,8 @@
 #include <regex>
 using namespace std;
 
+#define GETTEXT(x) x->GetText() ? x->GetText() : ""
+
 namespace internal
 {
 	bool IsUrlForWMTS(const string& url)
@@ -129,23 +131,23 @@ void WMSCapabilitiesWorker::ParseService(TiXmlElement* node, WMSCapabilitiesServ
 		}
 		else if (tagName == "Fees")
 		{
-			service.fees = curNode->GetText();
+			service.fees = GETTEXT(curNode);
 		}
 		else if (tagName == "AccessConstraints")
 		{
-			service.accessConstraints = curNode->GetText();
+			service.accessConstraints = GETTEXT(curNode);
 		}
 		else if (tagName == "LayerLimit")
 		{
-			service.layerLimit = stoul(curNode->GetText());
+			service.layerLimit = stoul(GETTEXT(curNode));
 		}
 		else if (tagName == "MaxWidth")
 		{
-			service.maxWidth = stoul(curNode->GetText());
+			service.maxWidth = stoul(GETTEXT(curNode));
 		}
 		else if (tagName == "MaxHeight")
 		{
-			service.maxHeight = stoul(curNode->GetText());
+			service.maxHeight = stoul(GETTEXT(curNode));
 		}
 
 		curNode = curNode->NextSiblingElement();
@@ -374,7 +376,7 @@ void WMSCapabilitiesWorker::ParseKeywords(TiXmlElement* node, vector<string>& ke
 	TiXmlElement* curNode = keywordsNode->FirstChildElement("ows:Keyword");
 	while (curNode)
 	{
-		keywords.push_back(curNode->GetText());
+		keywords.push_back(GETTEXT(curNode));
 		curNode = curNode->NextSiblingElement("ows:Keyword");
 	}
 }
@@ -432,7 +434,7 @@ void WMSCapabilitiesWorker::ParseLegendURL(TiXmlElement* node, WMSLayerStyle::WM
 
 		if (tagName == "Format")
 		{
-			legendURL.format = curNode->GetText();
+			legendURL.format = GETTEXT(curNode);
 		}
 		else if (tagName == "Format")
 		{
@@ -461,7 +463,7 @@ void WMSCapabilitiesWorker::ParseStyle(TiXmlElement* node, WMSLayerStyle& style)
 
 		if (tagName == "Name")
 		{
-			style.name = curNode->GetText();
+			style.name = GETTEXT(curNode);
 			/*string name = "";
 			if (GetValue(curNode, name) && !name.empty())
 			{
@@ -470,7 +472,7 @@ void WMSCapabilitiesWorker::ParseStyle(TiXmlElement* node, WMSLayerStyle& style)
 		}
 		else if (tagName == "Title")
 		{
-			style.title = curNode->GetText();
+			style.title = GETTEXT(curNode);
 			/*string title = "";
 			if (GetValue(curNode, title) && !title.empty())
 			{
@@ -479,7 +481,7 @@ void WMSCapabilitiesWorker::ParseStyle(TiXmlElement* node, WMSLayerStyle& style)
 		}
 		else if (tagName == "Abstract")
 		{
-			style.abstract = curNode->GetText();
+			style.abstract = GETTEXT(curNode);
 			/*string abstract = "";
 			if (GetValue(curNode, abstract) && !abstract.empty())
 			{
@@ -990,19 +992,19 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 		TiXmlElement* identifierNode = curNode->FirstChildElement("ows:Identifier");
 		if (identifierNode)
 		{
-			matrixSet.identifier = identifierNode->GetText();
+			matrixSet.identifier = GETTEXT(identifierNode);
 		}
 
 		TiXmlElement* titleNode = curNode->FirstChildElement("ows:Title");
 		if (titleNode)
 		{
-			matrixSet.title = titleNode->GetText();
+			matrixSet.title = GETTEXT(titleNode);
 		}
 
 		TiXmlElement* abstractNode = curNode->FirstChildElement("ows:Abstract");
 		if (abstractNode)
 		{
-			matrixSet.abstract = abstractNode->GetText();
+			matrixSet.abstract = GETTEXT(abstractNode);
 		}
 
 		ParseKeywords(curNode, matrixSet.keywordList);
@@ -1010,13 +1012,13 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 		TiXmlElement* wkScaleSetNode = curNode->FirstChildElement("WellKnownScaleSet");
 		if (wkScaleSetNode)
 		{
-			matrixSet.wkScaleSet = wkScaleSetNode->GetText();
+			matrixSet.wkScaleSet = GETTEXT(wkScaleSetNode);
 		}
 
 		TiXmlElement* supportedCRSNode = curNode->FirstChildElement("ows:SupportedCRS");
 		if (supportedCRSNode)
 		{
-			const string supportedCRSString = supportedCRSNode->GetText();
+			const string supportedCRSString = GETTEXT(supportedCRSNode);
 			OGRSpatialReference crs;
 			if (SetCRS(supportedCRSString, crs))
 			{
@@ -1039,19 +1041,19 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 					TiXmlElement* identifierNode = tileMatrixNode->FirstChildElement("ows:Identifier");
 					if (identifierNode)
 					{
-						tileMatrix.identifier = identifierNode->GetText();
+						tileMatrix.identifier = GETTEXT(identifierNode);
 					}
 
 					TiXmlElement* titleNode = tileMatrixNode->FirstChildElement("ows:Title");
 					if (titleNode)
 					{
-						tileMatrix.title = titleNode->GetText();
+						tileMatrix.title = GETTEXT(titleNode);
 					}
 
 					TiXmlElement* abstractNode = tileMatrixNode->FirstChildElement("ows:Abstract");
 					if (abstractNode)
 					{
-						tileMatrix.abstract = abstractNode->GetText();
+						tileMatrix.abstract = GETTEXT(abstractNode);
 					}
 
 					ParseKeywords(tileMatrixNode, tileMatrix.keywordList);
@@ -1059,13 +1061,13 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 					TiXmlElement* scaleDenominatorNode = tileMatrixNode->FirstChildElement("ScaleDenominator");
 					if (scaleDenominatorNode)
 					{
-						tileMatrix.scaleDenominator = stod(scaleDenominatorNode->GetText());
+						tileMatrix.scaleDenominator = stod(GETTEXT(scaleDenominatorNode));
 					}
 
 					TiXmlElement* topLeftNode = tileMatrixNode->FirstChildElement("TopLeftCorner");
 					if (topLeftNode)
 					{
-						const vector<string> topLeftString = SplitString(topLeftNode->GetText());
+						const vector<string> topLeftString = SplitString(GETTEXT(topLeftNode));
 						if (topLeftString.size() == 2)
 						{
 							tileMatrix.topLeft.x = (isAxisInverted ? stod(topLeftString[1]) : stod(topLeftString[0]));
@@ -1080,25 +1082,25 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 					TiXmlElement* tileWidthNode = tileMatrixNode->FirstChildElement("TileWidth");
 					if (tileWidthNode)
 					{
-						tileMatrix.tileWidth = stoi(tileWidthNode->GetText());
+						tileMatrix.tileWidth = stoi(GETTEXT(tileWidthNode));
 					}
 
 					TiXmlElement* tileHeightNode = tileMatrixNode->FirstChildElement("TileHeight");
 					if (tileHeightNode)
 					{
-						tileMatrix.tileHeight = stoi(tileHeightNode->GetText());
+						tileMatrix.tileHeight = stoi(GETTEXT(tileHeightNode));
 					}
 
 					TiXmlElement* matrixWidthNode = tileMatrixNode->FirstChildElement("MatrixWidth");
 					if (matrixWidthNode)
 					{
-						tileMatrix.matrixWidth = stoi(matrixWidthNode->GetText());
+						tileMatrix.matrixWidth = stoi(GETTEXT(matrixWidthNode));
 					}
 
 					TiXmlElement* matrixHeightNode = tileMatrixNode->FirstChildElement("MatrixHeight");
 					if (matrixHeightNode)
 					{
-						tileMatrix.matrixHeight = stoi(matrixHeightNode->GetText());
+						tileMatrix.matrixHeight = stoi(GETTEXT(matrixHeightNode));
 					}
 
 					if (IsTianDiTu())
@@ -1128,19 +1130,19 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 		TiXmlElement* identifierNode = layerNode->FirstChildElement("ows:Identifier");
 		if (identifierNode)
 		{
-			tileLayer.identifier = identifierNode->GetText();
+			tileLayer.identifier = GETTEXT(identifierNode);
 		}
 
 		TiXmlElement* titleNode = layerNode->FirstChildElement("ows:Title");
 		if (titleNode)
 		{
-			tileLayer.title = titleNode->GetText();
+			tileLayer.title = GETTEXT(titleNode);
 		}
 
 		TiXmlElement* abstractNode = layerNode->FirstChildElement("ows:Abstract");
 		if (abstractNode)
 		{
-			tileLayer.abstract = abstractNode->GetText();
+			tileLayer.abstract = GETTEXT(abstractNode);
 		}
 
 		ParseKeywords(layerNode, tileLayer.keywordList);
@@ -1153,8 +1155,8 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 			TiXmlElement* upperCornerNode = boundingBoxNode->FirstChildElement("ows:UpperCorner");
 			if (lowerCornerNode && upperCornerNode)
 			{
-				const vector<string> lowerCornerString = SplitString(lowerCornerNode->GetText());
-				const vector<string> upperCornerString = SplitString(upperCornerNode->GetText());
+				const vector<string> lowerCornerString = SplitString(GETTEXT(lowerCornerNode));
+				const vector<string> upperCornerString = SplitString(GETTEXT(upperCornerNode));
 				if (lowerCornerString.size() == 2 && upperCornerString.size() == 2)
 				{
 					boundingBox.crs = "CRS:84";
@@ -1173,8 +1175,8 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 			TiXmlElement* upperCornerNode = boundingBoxNode->FirstChildElement("ows:UpperCorner");
 			if (lowerCornerNode && upperCornerNode)
 			{
-				const vector<string> lowerCornerString = SplitString(lowerCornerNode->GetText());
-				const vector<string> upperCornerString = SplitString(upperCornerNode->GetText());
+				const vector<string> lowerCornerString = SplitString(GETTEXT(lowerCornerNode));
+				const vector<string> upperCornerString = SplitString(GETTEXT(upperCornerNode));
 				if (lowerCornerString.size() == 2 && upperCornerString.size() == 2)
 				{
 					boundingBox.bbox = Rectangle(stod(lowerCornerString[0]), stod(lowerCornerString[1]),
@@ -1222,7 +1224,6 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 			}
 		}
 
-
 		for (TiXmlElement* styleNode = layerNode->FirstChildElement("Style");
 			styleNode; styleNode = styleNode->NextSiblingElement("Style"))
 		{
@@ -1231,19 +1232,19 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 			TiXmlElement* identifierNode = styleNode->FirstChildElement("ows:Identifier");
 			if (identifierNode)
 			{
-				style.identifier = identifierNode->GetText();
+				style.identifier = GETTEXT(identifierNode);
 			}
 
 			TiXmlElement* titleNode = styleNode->FirstChildElement("ows:Title");
 			if (titleNode)
 			{
-				style.title = titleNode->GetText();
+				style.title = GETTEXT(titleNode);
 			}
 
 			TiXmlElement* abstractNode = styleNode->FirstChildElement("ows:Abstract");
 			if (abstractNode)
 			{
-				style.abstract = abstractNode->GetText();
+				style.abstract = GETTEXT(abstractNode);
 			}
 
 			ParseKeywords(styleNode, style.keywords);
@@ -1256,37 +1257,37 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 				TiXmlElement* formatNode = legendURLNode->FirstChildElement("format");
 				if (formatNode)
 				{
-					legendURL.format = formatNode->GetText();
+					legendURL.format = GETTEXT(formatNode);
 				}
 
 				TiXmlElement* minScaleNode = legendURLNode->FirstChildElement("minScale");
 				if (minScaleNode)
 				{
-					legendURL.minScale = stod(minScaleNode->GetText());
+					legendURL.minScale = stod(GETTEXT(minScaleNode));
 				}
 
 				TiXmlElement* maxScaleNode = legendURLNode->FirstChildElement("maxScale");
 				if (maxScaleNode)
 				{
-					legendURL.maxScale = stod(maxScaleNode->GetText());
+					legendURL.maxScale = stod(GETTEXT(maxScaleNode));
 				}
 
 				TiXmlElement* hrefNode = legendURLNode->FirstChildElement("href");
 				if (hrefNode)
 				{
-					legendURL.href = hrefNode->GetText();
+					legendURL.href = GETTEXT(hrefNode);
 				}
 
 				TiXmlElement* widthNode = legendURLNode->FirstChildElement("width");
 				if (widthNode)
 				{
-					legendURL.width = stoi(widthNode->GetText());
+					legendURL.width = stoi(GETTEXT(widthNode));
 				}
 
 				TiXmlElement* heightNode = legendURLNode->FirstChildElement("height");
 				if (heightNode)
 				{
-					legendURL.height = stoi(heightNode->GetText());
+					legendURL.height = stoi(GETTEXT(heightNode));
 				}
 
 				style.legendURLs.push_back(legendURL);
@@ -1332,7 +1333,7 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 			for (TiXmlElement* formatNode = layerNode->FirstChildElement("Format");
 				formatNode; formatNode = formatNode->NextSiblingElement("Format"))
 			{
-				const string format = formatNode->GetText();
+				const string format = GETTEXT(formatNode);
 				if (uniqueFormats.find(format) != uniqueFormats.end())
 				{
 					continue;
@@ -1362,7 +1363,7 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 			TiXmlElement* tileMatrixSetNode = tileMatrixSetLinkNode->FirstChildElement("TileMatrixSet");
 			if (tileMatrixSetNode)
 			{
-				tileMatrixSetLink.tileMatrixSet = tileMatrixSetNode->GetText();
+				tileMatrixSetLink.tileMatrixSet = GETTEXT(tileMatrixSetNode);
 			}
 
 			if (tileMatrixSets.find(tileMatrixSetLink.tileMatrixSet) == tileMatrixSets.end())
@@ -1383,7 +1384,7 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 					TiXmlElement* tileMatrixNode = tileMatrixLimitsNode->FirstChildElement("TileMatrix");
 					if (tileMatrixNode)
 					{
-						const string id = tileMatrixNode->GetText();
+						const string id = GETTEXT(tileMatrixNode);
 
 						bool isValid = false;
 						int matrixWidth = -1, matrixHeight = -1;
@@ -1409,10 +1410,10 @@ void WMSCapabilitiesWorker::ParseContents(TiXmlElement* node)
 							TiXmlElement* maxTileColNode = tileMatrixLimitsNode->FirstChildElement("MaxTileCol");
 							if (minTileRowNode && maxTileRowNode && minTileColNode && maxTileColNode)
 							{
-								limit.minTileRow = stoi(minTileRowNode->GetText());
-								limit.maxTileRow = stoi(maxTileRowNode->GetText());
-								limit.minTileCol = stoi(minTileColNode->GetText());
-								limit.maxTileCol = stoi(maxTileColNode->GetText());
+								limit.minTileRow = stoi(GETTEXT(minTileRowNode));
+								limit.maxTileRow = stoi(GETTEXT(maxTileRowNode));
+								limit.minTileCol = stoi(GETTEXT(minTileColNode));
+								limit.maxTileCol = stoi(GETTEXT(maxTileColNode));
 							}
 
 							isValid = (limit.minTileCol >= 0 && limit.minTileCol < matrixWidth &&
