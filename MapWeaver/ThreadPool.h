@@ -6,6 +6,7 @@
 #include <functional>
 #include <vector>
 #include <atomic>
+#include <future>
 
 // 生产者-消费者模式的线程池
 class ThreadPool
@@ -15,7 +16,7 @@ public:
 	~ThreadPool();
 
 	template <class F, class... Args>
-	void Enqueue(F&& f, Args&&... args);
+	auto Enqueue(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>>;
 
 	// 等待所有线程执行完毕
 	void WaitAll();
@@ -33,14 +34,27 @@ private:
 
 
 template <class F, class... Args>
-void ThreadPool::Enqueue(F&& f, Args&&... args)
+auto ThreadPool::Enqueue(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>>
 {
+	using return_type = std::invoke_result_t<F, Args...>;
+
+	auto task = std::make_shared<std::packaged_task<return_type()>>(
+		std::bind(std::forward<F>(f), std::forward<Args>(args)...)
+	);
+
+	std::future<return_type> res = task->get_future();
+
 	{
 		std::unique_lock<std::mutex> lock(queueMutex);
-		tasks.emplace([f, args...]() mutable {
-			std::invoke(f, args...);
-			});
+		if (stop.load())
+		{
+			throw std::runtime_error("Enqueue on stopped ThreadPool");
+		}
+
+		tasks.emplace([task]() { (*task)(); });
 		pendingTasks++;
 	}
+
 	condition.notify_one();
+	return res;
 }

@@ -4,6 +4,11 @@ using namespace std;
 
 ThreadPool::ThreadPool(size_t numThreads) : stop(false)
 {
+    if (numThreads == 0)
+    {
+        throw invalid_argument("ThreadPool must have at least one thread");
+    }
+
     for (size_t i = 0; i < numThreads; i++)
     {
         workers.emplace_back([this]
@@ -12,18 +17,18 @@ ThreadPool::ThreadPool(size_t numThreads) : stop(false)
             {
                 function<void()> task;
                 {
-                    unique_lock<mutex> lock(this->queueMutex);
-                    this->condition.wait(lock, [this] {
-                        return this->stop || !this->tasks.empty();
+                    unique_lock<mutex> lock(queueMutex);
+                    condition.wait(lock, [this] {
+                        return stop.load() || !tasks.empty();
                         });
 
-                    if (this->stop && this->tasks.empty())
+                    if (stop && tasks.empty())
                     {
                         return;
                     }
 
-                    task = move(this->tasks.front());
-                    this->tasks.pop();
+                    task = move(tasks.front());
+                    tasks.pop();
                 }
 
                 try
@@ -33,9 +38,7 @@ ThreadPool::ThreadPool(size_t numThreads) : stop(false)
                         task();
                     }
                 }
-                catch (const exception& e)
-                {
-                }
+                catch (...){ }
 
                 // 任务完成时更新计数器
                 {
@@ -61,14 +64,15 @@ void ThreadPool::WaitAll()
 
 ThreadPool::~ThreadPool()
 {
-	{
-		unique_lock<mutex> lock(queueMutex);
-		stop = true;
-	}
+    // 温和关闭：先处理完当前队列内所有任务后再退出线程
+    stop.store(true);
+    condition.notify_all();
 
-	condition.notify_all();
 	for (thread& worker : workers)
 	{
-		worker.join();
+        if (worker.joinable())
+        {
+            worker.join();
+        }
 	}
 }

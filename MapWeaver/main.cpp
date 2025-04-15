@@ -474,7 +474,7 @@ int main(int argc, char *argv[])
 
         // 下载和重投影瓦片
         start = chrono::high_resolution_clock::now();
-        ThreadPool pool(1);
+        ThreadPool pool(6);
         vector<string> errorInfos(tiles.size());
         vector<string> resultTilesPath(tiles.size());
         for (size_t i = 0; i < tiles.size(); i++)
