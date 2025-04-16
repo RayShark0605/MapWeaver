@@ -1,6 +1,6 @@
-#include <QtCore/QCoreApplication>
 #include <iostream>
 #include <mutex>
+#include <chrono>
 #include "WMSCapabilities.h"
 #include "Network.h"
 #include "ThreadPool.h"
