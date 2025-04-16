@@ -46,6 +46,24 @@ bool WMSLayerStyle::IsValid() const
 WMSLayer::WMSLayer(int orderID, const string& name, const string& title, const string& abstract) : orderID(orderID), name(name), title(title), abstract(abstract)
 {
 }
+bool WMSLayer::GetLayerTitleByID(int layerID, string& layerTitle) const
+{
+	if (orderID == layerID)
+	{
+		layerTitle = title;
+		return true;
+	}
+
+	for (const WMSLayer& subLayer : layer)
+	{
+		if (subLayer.GetLayerTitleByID(layerID, layerTitle))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
 bool WMSLayer::IsValid() const
 {
 	if (orderID < 0 || title.empty() || !ex_GeographicBoundingBox.IsValid())

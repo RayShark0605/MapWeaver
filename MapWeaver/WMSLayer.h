@@ -108,6 +108,9 @@ public:
 	WMSLayer() = default;
 	WMSLayer(int orderID, const std::string& name, const std::string& title, const std::string& abstract = "");
 
+	// 在当前Layer和递归地查找所有子Layer中，查找orderID为layerID的图层，返回layerTitle
+	bool GetLayerTitleByID(int layerID, std::string& layerTitle) const;
+
 	bool IsValid() const;
 };
 

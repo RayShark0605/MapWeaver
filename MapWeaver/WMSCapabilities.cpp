@@ -1623,6 +1623,22 @@ bool WMSCapabilitiesWorker::ParseCapabilities(const string& content, string& err
 		curNode = curNode->NextSiblingElement();
 	}
 
+	// 对于WMS服务，把在layers中没有的，但是在capability.layers中的图层，加到layers中
+	for (const WMSLayer& layer : capabilities.capability.layers)
+	{
+		const auto find = (find_if(layers.begin(), layers.end(), [](const WMSLayer& layer) {
+				return layer.orderID == 0;
+			}) != layers.end());
+		if (!find)
+		{
+			layers.push_back(layer);
+		}
+	}
+	sort(layers.begin(), layers.end(), [](const WMSLayer& layer1, const WMSLayer& layer2) {
+			return layer1.orderID < layer2.orderID;
+		});
+
+	// 构建layer树
 	if (!layerParents.empty())
 	{
 		layerTrees = LayerTree::GenerateLayerTree(layerParents);
@@ -1743,7 +1759,47 @@ string WMSCapabilitiesWorker::GetLayerCRS(const string& layerTitle, const string
 			continue;
 		}
 
-		return (layer.crs.empty() ? "EPSG:4326" : layer.crs[0]); // 对于WMS图层, 如果没有设置CRS，默认使用EPSG:4326
+		// 如果没有设置CRS，默认使用EPSG:4326
+		if (layer.crs.empty())
+		{
+			return "EPSG:4326";
+		}
+
+		// 如果设置了唯一CRS，则返回该唯一CRS
+		if (layer.crs.size() == 1)
+		{
+			return layer.crs[0];
+		}
+
+		// 优先查找EPSG:4326，次优先查找EPSG:3857，最后查找第一个有效的坐标系
+		if (find(layer.crs.begin(), layer.crs.end(), "EPSG:4326") != layer.crs.end())
+		{
+			return "EPSG:4326";
+		}
+		if (find(layer.crs.begin(), layer.crs.end(), "CRS:84") != layer.crs.end() || 
+			find(layer.crs.begin(), layer.crs.end(), "EPSG:3857") != layer.crs.end())
+		{
+			return "EPSG:3857";
+		}
+		for (const string& crsString : layer.crs)
+		{
+			OGRSpatialReference crs;
+			if (crs.SetFromUserInput(crsString.c_str()) != OGRERR_NONE)
+			{
+				continue;
+			}
+
+			const char* authName = crs.GetAuthorityName(nullptr);
+			const char* authCode = crs.GetAuthorityCode(nullptr);
+			if (!authName || !authCode)
+			{
+				continue;
+			}
+
+			return string(authName) + ":" + string(authCode);
+		}
+
+		return "EPSG:4326";
 	}
 
 	if (tileMatrixSets.find(tileMatrixSetName) == tileMatrixSets.end())
@@ -2045,6 +2101,7 @@ bool WMSCapabilitiesWorker::GetLayerTitleByID(int layerID, string& layerTitle) c
 			return true;
 		}
 	}
+
 	return false;
 }
 
