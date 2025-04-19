@@ -103,7 +103,7 @@ public:
 	std::string ExtractToken(const std::string& url) const;
 
 	// 根据指定图层名（title）和包络盒计算所需的瓦片信息
-	std::vector<TileInfo> CalculateTilesInfo(const std::string& layerTitle, const std::string& tileMatrixSetName, const std::string& format, const std::string& style, const BoundingBox& viewExtent, const std::string& url) const;
+	std::vector<TileInfo> CalculateTilesInfo(const std::string& layerTitle, const std::string& tileMatrixSetName, const std::string& format, const std::string& style, const BoundingBox& viewExtent, const std::string& url, bool useXlinkHref = false) const;
 
 	// 根据WMS图层标题获取WMS图层名
 	std::string GetWMSLayerName(const std::string& layerTitle) const;
@@ -165,10 +165,10 @@ private:
 	int CalculateLevel(const std::string& layerTitle, const std::string& tileMatrixSetName, const Rectangle& viewExtentCRS) const;
 
 	// 得到WMTS瓦片的下载链接
-	std::string CreateWMTSGetTileUrl(const std::string& url, const TileInfo& tileInfo) const;
+	std::string CreateWMTSGetTileUrl(const std::string& url, const TileInfo& tileInfo, bool useXlinkHref) const;
 
 	// 得到WMS的下载链接
-	std::string CreateWMSGetTileUrl(const std::string& url, const TileInfo& tileInfo) const;
+	std::string CreateWMSGetTileUrl(const std::string& url, const TileInfo& tileInfo, bool useXlinkHref) const;
 
 	// 是否是KVP请求
 	bool IsKVP() const;

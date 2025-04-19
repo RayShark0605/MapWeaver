@@ -107,6 +107,7 @@ namespace internal
 
 		if (string(imageData.buffer)._Starts_with("<?xml")) // 接收到的实际上是XML, 跳过
 		{
+			receiveInfo = "Received XML instead of image data";
 			return true;
 		}
 
@@ -397,6 +398,7 @@ bool DownloadAttempt(const string& url, const string& filePath, string& receiveI
 	CURL* curl = curl_easy_init();
 	if (!curl)
 	{
+		receiveInfo = "Failed to initialize curl";
 		curl_multi_cleanup(multiHandle);
 		return false;
 	}

@@ -3,6 +3,7 @@
 #include <unordered_set>
 #include <iomanip>
 #include <regex>
+#include "libxml/parser.h"
 using namespace std;
 
 #define GETTEXT(x) x->GetText() ? x->GetText() : ""
@@ -1558,6 +1559,36 @@ bool WMSCapabilitiesDownloader::DownloadCapabilitiesXML(const string& originUrl,
 	return true;
 }
 
+static string RemoveDTD(const string& content)
+{
+	// 使用libXML读字符串
+	const xmlDocPtr doc = xmlReadMemory(content.c_str(), content.size(), nullptr, nullptr, 0);
+	if (!doc)
+	{
+		return content;
+	}
+
+	// 删除DTD头
+	xmlDtdPtr dtdPtr = doc->intSubset;
+	if (dtdPtr)
+	{
+		xmlUnlinkNode((xmlNodePtr)dtdPtr);
+		xmlFree(dtdPtr);
+		dtdPtr = nullptr;
+	}
+
+	// 写入字符串
+	xmlChar* xmlBuffer = nullptr;
+	int bufferSize = 0;
+	xmlDocDumpFormatMemory(doc, &xmlBuffer, &bufferSize, 1);
+	xmlFreeDoc(doc);
+
+	const string strWithoutDTD((const char*)xmlBuffer);
+	xmlFree(xmlBuffer);
+
+	return strWithoutDTD;
+}
+
 bool WMSCapabilitiesWorker::ParseCapabilities(const string& content, string& errorInfo)
 {
 	errorInfo = "";
@@ -1587,8 +1618,19 @@ bool WMSCapabilitiesWorker::ParseCapabilities(const string& content, string& err
 	TiXmlElement* root = doc.RootElement();
 	if (!root)
 	{
-		errorInfo = "Can not get root element";
-		return false;
+		const string strWithoutDTD = RemoveDTD(content);
+		doc.Parse(strWithoutDTD.c_str());
+		if (doc.Error())
+		{
+			errorInfo = doc.ErrorDesc();
+			return false;
+		}
+		root = doc.RootElement();
+		if (!root)
+		{
+			errorInfo = "Can not get root element";
+			return false;
+		}
 	}
 
 	// 检查XML文件头
@@ -1861,7 +1903,7 @@ string WMSCapabilitiesWorker::ExtractToken(const string& url) const
 	return "";
 }
 
-vector<TileInfo> WMSCapabilitiesWorker::CalculateTilesInfo(const string& layerTitle, const string& tileMatrixSetName, const string& format, const string& style, const BoundingBox& viewExtent, const string& url) const
+vector<TileInfo> WMSCapabilitiesWorker::CalculateTilesInfo(const string& layerTitle, const string& tileMatrixSetName, const string& format, const string& style, const BoundingBox& viewExtent, const string& url, bool useXlinkHref) const
 {
 	const string tileCRS = GetLayerCRS(layerTitle, tileMatrixSetName);
 	if (tileCRS.empty())
@@ -1951,7 +1993,7 @@ vector<TileInfo> WMSCapabilitiesWorker::CalculateTilesInfo(const string& layerTi
 				tileInfo.bbox = BoundingBox(tileMatrixSet.crs, Rectangle(tileInfo.leftTopPtX, tileInfo.leftTopPtY,
 					tileInfo.leftTopPtX + tileWidthLength, tileInfo.leftTopPtY - tileHeightLength));
 				tileInfo.filePath = CreateWMTSFilePath(tileInfo);
-				tileInfo.url = CreateWMTSGetTileUrl(url, tileInfo);
+				tileInfo.url = CreateWMTSGetTileUrl(url, tileInfo, useXlinkHref);
 				tiles.push_back(tileInfo);
 			}
 		}
@@ -1975,7 +2017,7 @@ vector<TileInfo> WMSCapabilitiesWorker::CalculateTilesInfo(const string& layerTi
 	tileInfo.numWidthPixels = pixelWidth;
 	tileInfo.numHeightPixels = pixelHeight;
 	tileInfo.filePath = CreateWMSFilePath(tileInfo);
-	tileInfo.url = CreateWMSGetTileUrl(url, tileInfo);
+	tileInfo.url = CreateWMSGetTileUrl(url, tileInfo, useXlinkHref);
 	return { tileInfo };
 }
 
@@ -2220,11 +2262,19 @@ int WMSCapabilitiesWorker::CalculateLevel(const string& layerTitle, const string
 	return result;
 }
 
-string WMSCapabilitiesWorker::CreateWMTSGetTileUrl(const string& url, const TileInfo& tileInfo) const
+string WMSCapabilitiesWorker::CreateWMTSGetTileUrl(const string& url, const TileInfo& tileInfo, bool useXlinkHref) const
 {
 	if (IsKVP())
 	{
-		string requestUrl = URLProcessing::GetRequestBaseUrl(url);
+		string requestUrl = "";
+		if (useXlinkHref && !capabilities.capability.request.getTile.dcpType.empty())
+		{
+			requestUrl = capabilities.capability.request.getTile.dcpType[0].get;
+		}
+		else
+		{
+			requestUrl = URLProcessing::GetRequestBaseUrl(url);
+		}
 		URLProcessing::AddQueryParam(requestUrl, "SERVICE", "WMTS");
 		URLProcessing::AddQueryParam(requestUrl, "REQUEST", "GetTile");
 		URLProcessing::AddQueryParam(requestUrl, "VERSION", capabilities.version);
@@ -2276,7 +2326,7 @@ string WMSCapabilitiesWorker::CreateWMTSGetTileUrl(const string& url, const Tile
 	return "";
 }
 
-string WMSCapabilitiesWorker::CreateWMSGetTileUrl(const string& url, const TileInfo& tileInfo) const
+string WMSCapabilitiesWorker::CreateWMSGetTileUrl(const string& url, const TileInfo& tileInfo, bool useXlinkHref) const
 {
 	constexpr static int dpi = 96;
 	if (tileInfo.bbox.crs.empty())
@@ -2290,7 +2340,15 @@ string WMSCapabilitiesWorker::CreateWMSGetTileUrl(const string& url, const TileI
 		return "";
 	}
 
-	string requestUrl = URLProcessing::GetRequestBaseUrl(url);
+	string requestUrl = "";
+	if (useXlinkHref && !capabilities.capability.request.getMap.dcpType.empty())
+	{
+		requestUrl = capabilities.capability.request.getMap.dcpType[0].get;
+	}
+	else
+	{
+		requestUrl = URLProcessing::GetRequestBaseUrl(url);
+	}
 	URLProcessing::AddQueryParam(requestUrl, "SERVICE", "WMS");
 	URLProcessing::AddQueryParam(requestUrl, "VERSION", capabilities.version);
 	URLProcessing::AddQueryParam(requestUrl, "REQUEST", "GetMap");

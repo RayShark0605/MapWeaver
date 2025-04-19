@@ -354,7 +354,7 @@ bool DownloadAndReprojectTile(const TileInfo& tile, const string& targetCRS, str
     {
         return false;
     }
-    if (!ReprojectTile(tile, targetCRS, receiveInfo))
+    if (!ReprojectTile(tile, targetCRS, targetImagePath))
     {
         return false;
     }
@@ -470,7 +470,7 @@ int main(int argc, char *argv[])
         validViewExtentBoxTileCRS.bbox = Rectangle(validViewExtentBoxTileCRS.bbox.GetMinPoint() * bboxScale, validViewExtentBoxTileCRS.bbox.GetMaxPoint() * bboxScale);
 
         // 计算瓦片信息
-        const vector<TileInfo> tiles = worker.CalculateTilesInfo(layerTitle, tileMatrixSetName, format, style, validViewExtentBoxTileCRS, url);
+        vector<TileInfo> tiles = worker.CalculateTilesInfo(layerTitle, tileMatrixSetName, format, style, validViewExtentBoxTileCRS, url, false);
 
         // 下载和重投影瓦片
         start = chrono::high_resolution_clock::now();
@@ -482,6 +482,20 @@ int main(int argc, char *argv[])
             pool.Enqueue(DownloadAndReprojectTile, tiles[i], geoCRS, ref(errorInfos[i]), ref(resultTilesPath[i]), proxyUrl, "", "");
         }
         pool.WaitAll();
+
+		// 检查下载结果，如果有错误，则使用xLinkHref中的请求链接再次尝试
+        if (all_of(errorInfos.begin(), errorInfos.end(), [](const std::string& s) {
+            return s == "Received XML instead of image data";
+            }))
+        {
+            tiles = worker.CalculateTilesInfo(layerTitle, tileMatrixSetName, format, style, validViewExtentBoxTileCRS, url, true);
+            for (size_t i = 0; i < tiles.size(); i++)
+            {
+                pool.Enqueue(DownloadAndReprojectTile, tiles[i], geoCRS, ref(errorInfos[i]), ref(resultTilesPath[i]), proxyUrl, "", "");
+            }
+            pool.WaitAll();
+        }
+
         end = chrono::high_resolution_clock::now();
         duration = chrono::duration_cast<chrono::milliseconds>(end - start);
         cout << "下载和重投影完毕！耗时：" << duration.count() << " 毫秒" << endl;
