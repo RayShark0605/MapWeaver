@@ -1618,6 +1618,7 @@ bool WMSCapabilitiesWorker::ParseCapabilities(const string& content, string& err
 	TiXmlElement* root = doc.RootElement();
 	if (!root)
 	{
+		// 如果没有根元素，可能是因为XML文件头中有DTD声明
 		const string strWithoutDTD = RemoveDTD(content);
 		doc.Parse(strWithoutDTD.c_str());
 		if (doc.Error())
@@ -1640,8 +1641,9 @@ bool WMSCapabilitiesWorker::ParseCapabilities(const string& content, string& err
 		return false;
 	}
 
-	// 提取"version"
 	capabilities = WMSCapabilities();
+
+	// 提取"version"
 	GetAttribute(root, "version", capabilities.version);
 
 	// 遍历XML
