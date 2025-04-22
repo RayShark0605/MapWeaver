@@ -22,9 +22,6 @@
     <ClCompile Include="WMSLayer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Crypt.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Base.h">
@@ -43,9 +40,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="WMSLayer.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Crypt.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

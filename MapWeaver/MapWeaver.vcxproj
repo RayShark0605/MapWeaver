@@ -70,7 +70,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Link>
-      <AdditionalDependencies>libcurl-d.lib;libssl.lib;libcrypto.lib;tinyxml.lib;gdald.lib;Crypt32.lib;Advapi32.lib;libxml2.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libcurl-d.lib;libssl.lib;libcrypto.lib;tinyxml.lib;gdald.lib;libxml2.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <ClCompile>
       <PreprocessorDefinitions>WIN32;_WINDOWS;WIN;_WIN_;%(PreprocessorDefinitions);NOMINMAX;WIN32_LEAN_AND_MEAN</PreprocessorDefinitions>
@@ -85,7 +85,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>gdal.lib;libcrypto.lib;libcurl.lib;libssl.lib;tinyxml.lib;Crypt32.lib;Advapi32.lib;libxml2.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>gdal.lib;libcrypto.lib;libcurl.lib;libssl.lib;tinyxml.lib;libxml2.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
@@ -119,7 +119,6 @@
   <ItemGroup>
     <ClCompile Include="Base.cpp" />
     <ClCompile Include="Common.cpp" />
-    <ClCompile Include="Crypt.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Network.cpp" />
     <ClCompile Include="ThreadPool.cpp" />
@@ -129,7 +128,6 @@
   <ItemGroup>
     <ClInclude Include="Base.h" />
     <ClInclude Include="Common.h" />
-    <ClInclude Include="Crypt.h" />
     <ClInclude Include="Network.h" />
     <ClInclude Include="ThreadPool.h" />
     <ClInclude Include="WMSCapabilities.h" />

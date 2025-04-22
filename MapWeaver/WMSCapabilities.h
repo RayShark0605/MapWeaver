@@ -55,6 +55,7 @@ struct TileInfo
 	int level = -1;									// 该瓦片所在的层级。WMS默认为0
 	int row = -1, col = -1;							// 该瓦片在对应层级的矩阵中的行列号。WMS默认都为0
 	int numWidthPixels = 0, numHeightPixels = 0;	// 该瓦片的宽度高度像素数
+	int matrixWidth = 0, matrixHeight = 0;			// 该瓦片所在的矩阵的宽度和高度瓦片数
 	double leftTopPtX = 0, leftTopPtY = 0;			// 该瓦片左上角点在瓦片CRS下的坐标
 	std::string layerTitle = "", layerName = "";	// 该瓦片所属图层标题和图层名
 	std::string tileMatrixSet = "";					// 该瓦片所属的矩阵集名

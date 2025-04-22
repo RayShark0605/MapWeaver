@@ -1990,6 +1990,8 @@ vector<TileInfo> WMSCapabilitiesWorker::CalculateTilesInfo(const string& layerTi
 			{
 				tileInfo.row = tileRowIndex;
 				tileInfo.col = tileColIndex;
+				tileInfo.matrixWidth = tileMatrix->matrixWidth;
+				tileInfo.matrixHeight = tileMatrix->matrixHeight;
 				tileInfo.leftTopPtX = tileMatrix->topLeft.x + tileColIndex * tileWidthLength;
 				tileInfo.leftTopPtY = tileMatrix->topLeft.y - tileRowIndex * tileHeightLength;
 				tileInfo.bbox = BoundingBox(tileMatrixSet.crs, Rectangle(tileInfo.leftTopPtX, tileInfo.leftTopPtY,
@@ -2009,6 +2011,7 @@ vector<TileInfo> WMSCapabilitiesWorker::CalculateTilesInfo(const string& layerTi
 	TileInfo tileInfo;
 	tileInfo.level = 0;
 	tileInfo.row = tileInfo.col = 0;
+	tileInfo.matrixWidth = tileInfo.matrixHeight = 0;
 	tileInfo.format = format;
 	tileInfo.style = style;
 	tileInfo.layerName = GetWMSLayerName(layerTitle);

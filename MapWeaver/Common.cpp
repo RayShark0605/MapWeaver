@@ -553,7 +553,7 @@ vector<Point2d> GetIntersectionVertices(const vector<Point2d>& points1, const ve
 	return result;
 }
 
-static string GetDir(const string& filePath)
+string GetDir(const string& filePath)
 {
 	string dir = filePath;
 	replace(dir.begin(), dir.end(), '\\', '/');
@@ -565,7 +565,8 @@ static string GetDir(const string& filePath)
 
 	return dir;
 }
-static string GetFileName(const string& filePath)
+
+string GetFileName(const string& filePath)
 {
 	string filePathCopy = filePath;
 	replace(filePathCopy.begin(), filePathCopy.end(), '\\', '/');
@@ -807,7 +808,15 @@ bool ReprojectImage(const string& imagePath, const string& targetCRS, string& re
 		return false;
 	}
 
-	const string targetImagePath = GetDir(imagePath) + "/" + GetFileName(imagePath) + "_reproj.tiff";
+	string targetImagePath = "";
+	if (resultImagePath.empty())
+	{
+		targetImagePath = GetDir(imagePath) + "/" + GetFileName(imagePath) + "_reproj.tiff";
+	}
+	else
+	{
+		targetImagePath = resultImagePath;
+	}
 	if (GDALCreateAndReprojectImage(image, nullptr, targetImagePath.c_str(), targetWKT, tiffDriver, 
 		nullptr, GRA_NearestNeighbour, 0, 0.5, nullptr, nullptr, nullptr) != CPLErr::CE_None)
 	{

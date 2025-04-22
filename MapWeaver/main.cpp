@@ -157,10 +157,6 @@ bool GetUserInput(const WMSCapabilitiesWorker& worker, string& layerTitle, strin
     return true;
 }
 
-//const string url = "https://tiles.geovisearth.com/base/v1/wmts/GetCapabilities?tmsIds=w&token=1b6ea8d6e66808585e20b92eaed02c5edd0349a090b3b186b39e2b6f5074b51f";
-//const string url = "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities";
-//const string url = "http://www.ign.es/wmts/pnoa-ma?SERVICE=WMTS&REQUEST=GETCAPABILITIES";
-
 bool DownloadAndReprojectTile(const TileInfo& tile, const string& targetCRS, string& receiveInfo, string& targetImagePath, const string& proxyUrl = "", const string& proxyUserName = "", const string& proxyPassword = "")
 {
     if (!DownloadImageMultiThread(tile.url, tile.filePath, receiveInfo, proxyUrl, proxyUserName, proxyPassword))
@@ -172,6 +168,84 @@ bool DownloadAndReprojectTile(const TileInfo& tile, const string& targetCRS, str
         return false;
     }
     return true;
+}
+
+bool WriteSpliceImageToGPKG(const string& spliceImagePath, int level, const string& gpkgFilePath)
+{
+    if (level < 0)
+    {
+        return false;
+    }
+
+	string targetImagePath = GetDir(spliceImagePath) + "/exportToGPKG3857.tiff";
+	if (!ReprojectImage(spliceImagePath, "EPSG:3857", targetImagePath))
+	{
+		return false;
+	}
+
+    CPLSetConfigOption("GDAL_DATA", (GetProjDirPath() + "tms_NZTM2000.json").c_str());
+    GDALDataset* image = (GDALDataset*)GDALOpen(targetImagePath.c_str(), GA_ReadOnly);
+    if (!image)
+    {
+        return false;
+    }
+
+    GDALDriver* gpkgDriver = GetGDALDriverManager()->GetDriverByName("GPKG");
+    if (!gpkgDriver)
+    {
+        return false;
+    }
+
+    const string rasterTableString = "RASTER_TABLE=tiles_level_" + to_string(level);
+    const string zoomLevel = "ZOOM_LEVEL=" + to_string(level);
+
+    vector<char*> options;
+    if (FileExists(gpkgFilePath))
+    {
+		options = {
+			(char*)rasterTableString.c_str(),
+			(char*)"TILING_SCHEME=GoogleMapsCompatible",
+			(char*)zoomLevel.c_str(),
+			(char*)"APPEND_SUBDATASET=YES",
+			nullptr
+		};
+    }
+    else
+    {
+		options = {
+			(char*)rasterTableString.c_str(),
+			(char*)"TILING_SCHEME=GoogleMapsCompatible",
+			(char*)zoomLevel.c_str(),
+			nullptr
+		};
+    }
+
+    GDALDataset* outputDataset = gpkgDriver->CreateCopy(gpkgFilePath.c_str(), image, false, options.data(), nullptr, nullptr);
+    if (!outputDataset)
+    {
+		GDALClose(image);
+		return false;
+    }
+    GDALClose(outputDataset);
+    GDALClose(image);
+    ForceDeleteFile(targetImagePath);
+    return true;
+}
+
+string ExtractTileLayerMD5(const TileInfo& tile)
+{
+    const vector<string> tilePathParts = SplitString(tile.filePath, '/');
+    if (tilePathParts.empty())
+    {
+        return "";
+    }
+	const string& tileName = tilePathParts.back();
+    const vector<string> tileNameParts = SplitString(tileName, '_');
+	if (tileNameParts.empty())
+	{
+		return "";
+	}
+    return tileNameParts[0];
 }
 
 int main(int argc, char *argv[])
@@ -233,7 +307,7 @@ int main(int argc, char *argv[])
         // 获取有效范围
         //const BoundingBox viewExtent4326("EPSG:4326", 124.8250, 32.6901, 159.0153, 49.8245);
         const BoundingBox viewExtent4326("EPSG:4326", -180, -90, 180, 90);
-        //const BoundingBox viewExtent4326("EPSG:4326", 108, 29, 116, 33);
+        //const BoundingBox viewExtent4326("EPSG:4326", 113, 29, 115, 31); // 武汉市范围
         //const string geoCRS = "EPSG:2381";
         const string geoCRS = "EPSG:4326"; // 先纬度后经度
 
@@ -284,6 +358,11 @@ int main(int argc, char *argv[])
 
         // 计算瓦片信息
         vector<TileInfo> tiles = worker.CalculateTilesInfo(layerTitle, tileMatrixSetName, format, style, validViewExtentBoxTileCRS, url, false);
+        if (tiles.empty())
+        {
+            cout << "不存在瓦片！" << endl;
+            continue;
+        }
 
         // 下载和重投影瓦片
         start = chrono::high_resolution_clock::now();
@@ -312,7 +391,6 @@ int main(int argc, char *argv[])
         end = chrono::high_resolution_clock::now();
         duration = chrono::duration_cast<chrono::milliseconds>(end - start);
         cout << "下载和重投影完毕！耗时：" << duration.count() << " 毫秒" << endl;
-
 
         // 瓦片拼接
         string spliceImagePath = "";
@@ -346,6 +424,10 @@ int main(int argc, char *argv[])
             cout << "重投影失败！耗时：" << duration.count() << " 毫秒" << endl;
             continue;
         }
+
+		// 写入GeoPackage数据库
+		const string gpkgFilePath = GetTempDirPath() + "/" + ExtractTileLayerMD5(tiles[0]) + ".gpkg";
+		WriteSpliceImageToGPKG(spliceImagePath, tiles[0].level, gpkgFilePath);
     }
     return 0;
 }

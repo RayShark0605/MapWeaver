@@ -134,6 +134,10 @@ BoundingBox GetBoundingBoxOverlap(const BoundingBox& bbox1, const BoundingBox& b
 // 计算两个四边形（不一定是矩形）的交集区域
 std::vector<Point2d> GetIntersectionVertices(const std::vector<Point2d>& points1, const std::vector<Point2d>& points2);
 
+std::string GetDir(const std::string& filePath);
+
+std::string GetFileName(const std::string& filePath);
+
 // 瓦片拼接
 struct TileInfo;
 bool TileSplice(const std::vector<TileInfo>& tiles, std::string& resultImagePath);
