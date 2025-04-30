@@ -64,6 +64,23 @@ bool WMSLayer::GetLayerTitleByID(int layerID, string& layerTitle) const
 
 	return false;
 }
+vector<const WMSLayer*> WMSLayer::GetAllLayers() const
+{
+	vector<const WMSLayer*> allLayers;
+	allLayers.push_back(this);
+	for (const WMSLayer& subLayer : layer)
+	{
+		const vector<const WMSLayer*> subLayers = subLayer.GetAllLayers();
+		for (const WMSLayer* subLayerPtr : subLayers)
+		{
+			if (find(allLayers.begin(), allLayers.end(), subLayerPtr) == allLayers.end())
+			{
+				allLayers.push_back(subLayerPtr);
+			}
+		}
+	}
+	return allLayers;
+}
 bool WMSLayer::IsValid() const
 {
 	if (orderID < 0 || title.empty() || !ex_GeographicBoundingBox.IsValid())

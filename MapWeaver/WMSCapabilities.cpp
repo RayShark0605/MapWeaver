@@ -1670,12 +1670,16 @@ bool WMSCapabilitiesWorker::ParseCapabilities(const string& content, string& err
 	// 对于WMS服务，把在layers中没有的，但是在capability.layers中的图层，加到layers中
 	for (const WMSLayer& layer : capabilities.capability.layers)
 	{
-		const auto find = (find_if(layers.begin(), layers.end(), [](const WMSLayer& layer) {
-				return layer.orderID == 0;
-			}) != layers.end());
-		if (!find)
+		const vector<const WMSLayer*> allLayers = layer.GetAllLayers();
+		for (const WMSLayer* nextLayer : allLayers)
 		{
-			layers.push_back(layer);
+			const auto find = (find_if(layers.begin(), layers.end(), [nextLayer](const WMSLayer& layer) {
+				return layer.orderID == nextLayer->orderID;
+				}) != layers.end());
+			if (!find)
+			{
+				layers.push_back(*nextLayer);
+			}
 		}
 	}
 	sort(layers.begin(), layers.end(), [](const WMSLayer& layer1, const WMSLayer& layer2) {

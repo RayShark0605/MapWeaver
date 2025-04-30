@@ -250,6 +250,7 @@ string ExtractTileLayerMD5(const TileInfo& tile)
 
 int main(int argc, char *argv[])
 {
+
     GDALAllRegister();
 
     while (true)

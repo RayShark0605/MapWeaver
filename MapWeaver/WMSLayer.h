@@ -111,6 +111,8 @@ public:
 	// 在当前Layer和递归地查找所有子Layer中，查找orderID为layerID的图层，返回layerTitle
 	bool GetLayerTitleByID(int layerID, std::string& layerTitle) const;
 
+	std::vector<const WMSLayer*> GetAllLayers() const;
+
 	bool IsValid() const;
 };
 
