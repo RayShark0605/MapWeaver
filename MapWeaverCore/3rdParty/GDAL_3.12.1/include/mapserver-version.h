@@ -1,0 +1,11 @@
+#ifndef _MAPSERVER_VERSION_H
+#define _MAPSERVER_VERSION_H
+
+#define MS_VERSION_MAJOR 8
+#define MS_VERSION_MINOR 6
+#define MS_VERSION_REV 0
+#define MS_VERSION "8.6.0"
+#define MS_VERSION_NUM  80600 
+
+#endif
+

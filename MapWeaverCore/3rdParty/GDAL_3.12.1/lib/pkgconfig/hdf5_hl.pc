@@ -1,0 +1,14 @@
+prefix=E:/buildsystem2/src/hdf5/vc17x64/install
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: hdf5_hl
+Description: HDF5 (Hierarchical Data Format 5) Software Library
+Version: 1.14.3
+
+Cflags: -I${includedir}
+Libs: -L${libdir}  -lhdf5_hl
+Requires: hdf5 = 1.14.3
+Libs.private:  -lhdf5_hl 
+Requires.private: hdf5 = 1.14.3

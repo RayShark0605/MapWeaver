@@ -1,0 +1,11 @@
+prefix=E:/buildsystem2/release-1944-x64 
+exec_prefix=${prefix} 
+libdir=${exec_prefix}/lib 
+includedir=${prefix}/include 
+ 
+Name: libxml-2.0 
+Description: XML C parser and toolkit 
+Version: 2.15.1 
+ 
+Cflags: -I${includedir} 
+Libs: -L${libdir} -lxml2 -liconv -lzlib 

@@ -1,0 +1,13 @@
+prefix=E:\buildsystem2\release-1944-x64
+exec_prefix=${prefix}
+libdir=${exec_prefix}
+includedir=${prefix}/include ${prefix}/./include 
+enginesdir=${libdir}/engines
+modulesdir=${libdir}/providers
+
+Name: OpenSSL-libcrypto
+Description: OpenSSL cryptography library
+Version: 3.6.0
+Libs: -L${libdir} -lcrypto
+Libs.private: E:\buildsystem2\release-1944-x64\lib\zlib.lib ws2_32.lib gdi32.lib advapi32.lib crypt32.lib user32.lib
+Cflags: -I${prefix}/include  -I${prefix}/./include 

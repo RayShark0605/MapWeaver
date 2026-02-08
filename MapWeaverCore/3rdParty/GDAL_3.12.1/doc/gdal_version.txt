@@ -1,0 +1,1 @@
+GDAL 3.12.1 "Chicoutimi", released 2025/12/12
