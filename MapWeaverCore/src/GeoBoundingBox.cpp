@@ -1,4 +1,5 @@
 ﻿#include "GeoBoundingBox.h"
+#include "GeoCrs.h"
 
 const GeoBoundingBox GeoBoundingBox::Invalid = GeoBoundingBox();
 
@@ -12,30 +13,40 @@ GeoBoundingBox::GeoBoundingBox(const std::string& wktUtf8) : wktUtf8(wktUtf8)
 
 GeoBoundingBox::GeoBoundingBox(const std::string& wktUtf8, const GB_Rectangle& rect) : wktUtf8(wktUtf8), rect(rect)
 {
+	if (this->rect.IsValid())
+	{
+		this->rect.Normalize();
+	}
 }
 
 GeoBoundingBox::~GeoBoundingBox()
 {
 }
 
-bool GeoBoundingBox::operator==(const GB_Rectangle& other) const
+bool GeoBoundingBox::operator==(const GeoBoundingBox& other) const
 {
+	if (wktUtf8 == other.wktUtf8)
+	{
+		return rect == other.rect;
+	}
 
+	const GeoCrs thisCrs = GeoCrs::CreateFromWkt(wktUtf8);
+	const GeoCrs otherCrs = GeoCrs::CreateFromWkt(other.wktUtf8);
+	if (thisCrs != otherCrs)
+	{
+		return false;
+	}
 
-	return true;
+	return rect == other.rect;
 }
 
-bool GeoBoundingBox::operator!=(const GB_Rectangle& other) const
+bool GeoBoundingBox::operator!=(const GeoBoundingBox& other) const
 {
-
-
-	return true;
+	return !(*this == other);
 }
 
 bool GeoBoundingBox::IsValid() const
 {
-
-	return false;
 }
 
 void GeoBoundingBox::Reset()

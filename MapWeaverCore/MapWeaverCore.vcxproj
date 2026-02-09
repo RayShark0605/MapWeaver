@@ -21,6 +21,7 @@
   <ItemGroup>
     <ClInclude Include="include\GeoBoundingBox.h" />
     <ClInclude Include="include\GeoCrs.h" />
+    <ClInclude Include="include\GeoCrsManager.h" />
     <ClInclude Include="include\MapLayer.h" />
     <ClInclude Include="include\MapWeaverBase.h" />
     <ClInclude Include="include\MapWeaverPort.h" />
@@ -28,6 +29,7 @@
   <ItemGroup>
     <ClCompile Include="src\GeoBoundingBox.cpp" />
     <ClCompile Include="src\GeoCrs.cpp" />
+    <ClCompile Include="src\GeoCrsManager.cpp" />
     <ClCompile Include="src\MapWeaverBase.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">

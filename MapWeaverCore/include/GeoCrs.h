@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -114,10 +115,10 @@ public:
 
     struct LonLatAreaSegment
     {
-        double west = 0.0;
-        double south = 0.0;
-        double east = 0.0;
-        double north = 0.0;
+        double west = 0;
+        double south = 0;
+        double east = 0;
+        double north = 0;
     };
 
     // 获取坐标系的经纬度有效范围分段表示（最多 2 段），用于处理跨越日期变更线的 CRS。
@@ -137,7 +138,9 @@ public:
     // 更安全的只读访问：返回内部对象的引用。
     const OGRSpatialReference& GetConstRef() const;
 
-    // 注意：返回的引用为内部对象，修改会直接影响 GeoCrs；且 GeoCrs 本身不是线程安全类型。
+    // 注意：返回的引用为内部对象，修改会直接影响 GeoCrs。
+    // 本类对 const 接口提供内部互斥保护，允许并发只读；但通过 GetRef()/Get() 取得的可写引用/指针
+    // 不提供跨线程安全保证，且不应在多个线程中长期持有并同时读写。
     OGRSpatialReference& GetRef();
 
     // 注意：返回的指针为内部对象（借用，不转移所有权）。不要对返回指针调用 Release()/delete。
@@ -146,6 +149,25 @@ public:
 
 private:
     void InvalidateCaches() const;
+    void InvalidateCachesNoLock() const;
+
+    bool ResetNoLock();
+
+    bool IsEmptyNoLock() const;
+
+    bool IsValidNoLock() const;
+
+    OGRSpatialReference* EnsureSpatialReferenceNoLock();
+
+    int TryGetEpsgCodeNoLock(bool tryAutoIdentify, bool tryFindBestMatch, int minMatchConfidence) const;
+
+    std::string ExportToWktUtf8NoLock(WktFormat format, bool multiline) const;
+
+    std::vector<LonLatAreaSegment> GetValidAreaLonLatSegmentsNoLock() const;
+
+    GeoBoundingBox GetValidAreaLonLatNoLock() const;
+
+    GeoBoundingBox GetValidAreaNoLock() const;
 
 private:
     std::unique_ptr<OGRSpatialReference, GeoCrsOgrSrsDeleter> spatialReference;
@@ -153,6 +175,9 @@ private:
     // GDAL 3.0+ 起坐标轴顺序默认遵循 CRS 定义（例如 EPSG:4326 为纬度/经度）。
     // 本类默认使用传统 GIS 顺序以减少“经纬度顺序”踩坑。
     bool useTraditionalGisAxisOrder = true;
+
+    // 互斥：保护 spatialReference 与所有缓存字段，使 const 接口在并发读场景下安全。
+    mutable std::recursive_mutex mutex;
 
     // ---- 缓存：避免重复进行 AutoIdentifyEPSG / FindBestMatch 等可能较重的逻辑 ----
     // 默认参数（tryAutoIdentify=true, tryFindBestMatch=false, minMatchConfidence=90）下的 EPSG 结果缓存

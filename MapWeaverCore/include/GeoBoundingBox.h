@@ -23,17 +23,14 @@ public:
 	GeoBoundingBox(const std::string& wktUtf8, const GB_Rectangle& rect);
 	virtual ~GeoBoundingBox();
 
-	bool operator==(const GB_Rectangle& other) const;
-	bool operator!=(const GB_Rectangle& other) const;
+	bool operator==(const GeoBoundingBox& other) const;
+	bool operator!=(const GeoBoundingBox& other) const;
 
 	bool IsValid() const;
 
 	void Reset();
 
 	void Set(const std::string& wktUtf8, const GB_Rectangle& rect);
-
-
-
 
 	std::string SerializeToString() const;
 	GB_ByteBuffer SerializeToBinary() const;

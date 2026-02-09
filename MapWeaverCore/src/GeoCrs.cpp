@@ -3,6 +3,7 @@
 #include "Geometry/GB_Point2d.h"
 #include "Geometry/GB_Rectangle.h"
 #include "GB_Logger.h"
+#include "GB_Utf8String.h"
 
 #include "cpl_conv.h"
 #include "ogr_spatialref.h"
@@ -13,8 +14,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cerrno>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -250,7 +253,7 @@ void GeoCrsOgrSrsDeleter::operator()(OGRSpatialReference* srs) const noexcept
 	srs->Release();
 }
 
-GeoCrs::GeoCrs(): spatialReference(nullptr)
+GeoCrs::GeoCrs() : spatialReference(nullptr)
 {
 	spatialReference.reset(CreateOgrSpatialReference());
 	if (spatialReference)
@@ -258,11 +261,13 @@ GeoCrs::GeoCrs(): spatialReference(nullptr)
 		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
 	}
 
-	InvalidateCaches();
+	InvalidateCachesNoLock();
 }
 
-GeoCrs::GeoCrs(const GeoCrs& other) : spatialReference(nullptr), useTraditionalGisAxisOrder(other.useTraditionalGisAxisOrder)
+
+GeoCrs::GeoCrs(const GeoCrs& other) : spatialReference(nullptr)
 {
+	std::lock_guard<std::recursive_mutex> otherLock(other.mutex);
 	if (other.spatialReference)
 	{
 		spatialReference.reset(other.spatialReference->Clone());
@@ -272,83 +277,20 @@ GeoCrs::GeoCrs(const GeoCrs& other) : spatialReference(nullptr), useTraditionalG
 		spatialReference.reset(CreateOgrSpatialReference());
 	}
 
-	if (spatialReference)
-	{
-		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
-	}
-
-	InvalidateCaches();
-}
-
-GeoCrs::GeoCrs(GeoCrs&& other) noexcept : spatialReference(std::move(other.spatialReference)), useTraditionalGisAxisOrder(other.useTraditionalGisAxisOrder)
-{
-	if (spatialReference)
-	{
-		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
-	}
-
-	InvalidateCaches();
-
-	// 让 moved-from 对象保持“可用的空 CRS”状态，避免后续误用导致空指针问题。
-	other.useTraditionalGisAxisOrder = true;
-	if (other.spatialReference == nullptr)
-	{
-		other.spatialReference.reset(CreateOgrSpatialReference());
-		if (other.spatialReference)
-		{
-			ApplyAxisOrderStrategy(*other.spatialReference, other.useTraditionalGisAxisOrder);
-		}
-	}
-	other.InvalidateCaches();
-}
-
-void GeoCrs::InvalidateCaches() const
-{
-	hasCachedDefaultEpsgCode = false;
-	cachedDefaultEpsgCode = 0;
-
-	cachedUidKind = -2;
-	cachedUidWktHash = 0;
-}
-
-GeoCrs::~GeoCrs() = default;
-
-GeoCrs& GeoCrs::operator=(const GeoCrs& other)
-{
-	if (this == &other)
-	{
-		return *this;
-	}
-
 	useTraditionalGisAxisOrder = other.useTraditionalGisAxisOrder;
 
-	std::unique_ptr<OGRSpatialReference, GeoCrsOgrSrsDeleter> newSrs(nullptr);
-	if (other.spatialReference)
+	if (spatialReference)
 	{
-		newSrs.reset(other.spatialReference->Clone());
-	}
-	else
-	{
-		newSrs.reset(CreateOgrSpatialReference());
+		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
 	}
 
-	if (newSrs)
-	{
-		ApplyAxisOrderStrategy(*newSrs, useTraditionalGisAxisOrder);
-	}
-
-	spatialReference.swap(newSrs);
-
-	InvalidateCaches();
-	return *this;
+	InvalidateCachesNoLock();
 }
 
-GeoCrs& GeoCrs::operator=(GeoCrs&& other) noexcept
+
+GeoCrs::GeoCrs(GeoCrs&& other) noexcept : spatialReference(nullptr)
 {
-	if (this == &other)
-	{
-		return *this;
-	}
+	std::lock_guard<std::recursive_mutex> otherLock(other.mutex);
 
 	spatialReference = std::move(other.spatialReference);
 	useTraditionalGisAxisOrder = other.useTraditionalGisAxisOrder;
@@ -358,9 +300,9 @@ GeoCrs& GeoCrs::operator=(GeoCrs&& other) noexcept
 		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
 	}
 
-	InvalidateCaches();
+	InvalidateCachesNoLock();
 
-	// 让 moved-from 对象保持“可用的空 CRS”状态，避免后续误用导致空指针问题。
+	// 保持被移动对象处于可用状态：确保其内部指针非空，且缓存失效。
 	other.useTraditionalGisAxisOrder = true;
 	if (other.spatialReference == nullptr)
 	{
@@ -370,148 +312,28 @@ GeoCrs& GeoCrs::operator=(GeoCrs&& other) noexcept
 			ApplyAxisOrderStrategy(*other.spatialReference, other.useTraditionalGisAxisOrder);
 		}
 	}
-	other.InvalidateCaches();
-
-	return *this;
+	other.InvalidateCachesNoLock();
 }
 
-GeoCrs GeoCrs::CreateFromWkt(const std::string& wktUtf8)
+
+void GeoCrs::InvalidateCachesNoLock() const
 {
-	GeoCrs crs;
-	crs.SetFromWkt(wktUtf8);
-	return crs;
+	hasCachedDefaultEpsgCode = false;
+	cachedDefaultEpsgCode = 0;
+
+	cachedUidKind = -2;
+	cachedUidWktHash = 0;
 }
 
-GeoCrs GeoCrs::CreateFromEpsgCode(int epsgCode)
+void GeoCrs::InvalidateCaches() const
 {
-	GeoCrs crs;
-	crs.SetFromEpsgCode(epsgCode);
-	return crs;
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	InvalidateCachesNoLock();
 }
 
-GeoCrs GeoCrs::CreateFromUserInput(const std::string& definitionUtf8, bool allowNetworkAccess, bool allowFileAccess)
+bool GeoCrs::IsEmptyNoLock() const
 {
-	GeoCrs crs;
-	crs.SetFromUserInput(definitionUtf8, allowNetworkAccess, allowFileAccess);
-	return crs;
-}
-
-bool GeoCrs::Reset()
-{
-	OGRSpatialReference* srs = Get();
-	if (srs == nullptr)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::Reset】空的 srs。"));
-		InvalidateCaches();
-		return false;
-	}
-
-	srs->Clear();
-	ApplyAxisOrderStrategy(*srs, useTraditionalGisAxisOrder);
-	InvalidateCaches();
-	return true;
-}
-
-bool GeoCrs::SetFromWkt(const std::string& wktUtf8)
-{
-	Reset();
-
-	if (wktUtf8.empty())
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromWkt】空的 wktUtf8。"));
-		return false;
-	}
-
-	OGRSpatialReference* srs = Get();
-	if (srs == nullptr)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromWkt】空的 srs。"));
-		return false;
-	}
-
-	const OGRErr err = srs->importFromWkt(wktUtf8.c_str());
-	if (err != OGRERR_NONE)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromWkt】importFromWkt 出错: ") + std::to_string(static_cast<int>(err)));
-		Reset();
-		return false;
-	}
-
-	ApplyAxisOrderStrategy(*srs, useTraditionalGisAxisOrder);
-	InvalidateCaches();
-	return IsValid();
-}
-
-bool GeoCrs::SetFromEpsgCode(int epsgCode)
-{
-	Reset();
-
-	if (epsgCode <= 0)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromEpsgCode】epsgCode非正: ") + std::to_string(epsgCode));
-		return false;
-	}
-
-	OGRSpatialReference* srs = Get();
-	if (srs == nullptr)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromEpsgCode】空的 srs。"));
-		return false;
-	}
-
-	const OGRErr err = srs->importFromEPSG(epsgCode);
-	if (err != OGRERR_NONE)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromEpsgCode】importFromWkt 出错: ") + std::to_string(static_cast<int>(err)));
-		Reset();
-		return false;
-	}
-
-	ApplyAxisOrderStrategy(*srs, useTraditionalGisAxisOrder);
-	InvalidateCaches();
-	return IsValid();
-}
-
-bool GeoCrs::SetFromUserInput(const std::string& definitionUtf8, bool allowNetworkAccess, bool allowFileAccess)
-{
-	Reset();
-
-	if (definitionUtf8.empty())
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】definitionUtf8 为空。"));
-		return false;
-	}
-
-	OGRSpatialReference* srs = Get();
-	if (srs == nullptr)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】srs 为空。"));
-		return false;
-	}
-
-	const char* const options[] =
-	{
-		allowNetworkAccess ? "ALLOW_NETWORK_ACCESS=YES" : "ALLOW_NETWORK_ACCESS=NO",
-		allowFileAccess ? "ALLOW_FILE_ACCESS=YES" : "ALLOW_FILE_ACCESS=NO",
-		nullptr
-	};
-
-	const OGRErr err = srs->SetFromUserInput(definitionUtf8.c_str(), options);
-	if (err != OGRERR_NONE)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】SetFromUserInput 出错: ") + std::to_string(static_cast<int>(err)));
-		Reset();
-		return false;
-	}
-
-	ApplyAxisOrderStrategy(*srs, useTraditionalGisAxisOrder);
-	InvalidateCaches();
-	return IsValid();
-}
-
-bool GeoCrs::IsEmpty() const
-{
-	if (!spatialReference)
+	if (spatialReference == nullptr)
 	{
 		return true;
 	}
@@ -519,9 +341,9 @@ bool GeoCrs::IsEmpty() const
 	return spatialReference->IsEmpty();
 }
 
-bool GeoCrs::IsValid() const
+bool GeoCrs::IsValidNoLock() const
 {
-	if (IsEmpty())
+	if (IsEmptyNoLock())
 	{
 		return false;
 	}
@@ -529,262 +351,40 @@ bool GeoCrs::IsValid() const
 	return spatialReference->Validate() == OGRERR_NONE;
 }
 
-std::string GeoCrs::GetNameUtf8() const
+OGRSpatialReference* GeoCrs::EnsureSpatialReferenceNoLock()
 {
-	if (IsEmpty())
+	const bool needCreate = (spatialReference == nullptr);
+	if (needCreate)
 	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::GetNameUtf8】变量为空。"));
-		return "";
-	}
-
-	const char* name = spatialReference->GetName();
-	return name ? std::string(name) : std::string();
-}
-
-std::string GeoCrs::GetUidUtf8() const
-{
-	if (IsEmpty())
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::GetNameUtf8】变量为空。"));
-		return "";
-	}
-
-	// 快速返回缓存
-	if (cachedUidKind != -2)
-	{
-		if (cachedUidKind > 0)
+		spatialReference.reset(CreateOgrSpatialReference());
+		if (spatialReference)
 		{
-			return std::string("EPSG:") + std::to_string(cachedUidKind);
+			ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
 		}
-
-		if (cachedUidKind == 0)
-		{
-			return std::string("WKT2_2018:FNV1A64:") + ToHex64(cachedUidWktHash);
-		}
-
-		GBLOG_WARNING(GB_STR("【GeoCrs::GetNameUtf8】未知的 cachedUidKind。"));
-		return "";
 	}
 
-	const int epsgCode = TryGetEpsgCode(true, false, 90);
-	if (epsgCode > 0)
-	{
-		cachedUidKind = epsgCode;
-		return std::string("EPSG:") + std::to_string(epsgCode);
-	}
-
-	const std::string wkt = ExportToWktUtf8(WktFormat::Wkt2_2018, false);
-	if (wkt.empty())
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::GetNameUtf8】ExportToWktUtf8 结果为空。"));
-		cachedUidKind = -1;
-		return "";
-	}
-
-	cachedUidWktHash = Fnv1a64(wkt.data(), wkt.size());
-	cachedUidKind = 0;
-
-	return std::string("WKT2_2018:FNV1A64:") + ToHex64(cachedUidWktHash);
+	return spatialReference.get();
 }
 
-bool GeoCrs::operator==(const GeoCrs& other) const
+bool GeoCrs::ResetNoLock()
 {
-	if (IsEmpty() && other.IsEmpty())
+	OGRSpatialReference* srs = EnsureSpatialReferenceNoLock();
+	if (srs == nullptr)
 	{
-		return true;
-	}
-
-	if (IsEmpty() != other.IsEmpty())
-	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::Reset】空的 srs。"));
+		InvalidateCachesNoLock();
 		return false;
 	}
 
-
-	// 忽略 axis mapping 差异：本类允许通过 SetTraditionalGisAxisOrder() 在两种策略间切换。
-	// GDAL 的 IsSame(...) 默认会考虑 data axis <-> CRS axis 的 mapping；这里显式忽略它。
-	const char* const options[] =
-	{
-		"IGNORE_DATA_AXIS_TO_SRS_AXIS_MAPPING=YES",
-		"CRITERION=EQUIVALENT_EXCEPT_AXIS_ORDER_GEOGCRS",
-		nullptr
-	};
-
-	return spatialReference->IsSame(other.spatialReference.get(), options) != 0;
+	srs->Clear();
+	ApplyAxisOrderStrategy(*srs, useTraditionalGisAxisOrder);
+	InvalidateCachesNoLock();
+	return true;
 }
 
-bool GeoCrs::operator!=(const GeoCrs& other) const
+int GeoCrs::TryGetEpsgCodeNoLock(bool tryAutoIdentify, bool tryFindBestMatch, int minMatchConfidence) const
 {
-	return !(*this == other);
-}
-
-bool GeoCrs::IsGeographic() const
-{
-	if (IsEmpty())
-	{
-		return false;
-	}
-
-	return spatialReference->IsGeographic() != 0;
-}
-
-bool GeoCrs::IsProjected() const
-{
-	if (IsEmpty())
-	{
-		return false;
-	}
-
-	return spatialReference->IsProjected() != 0;
-}
-
-bool GeoCrs::IsLocal() const
-{
-	if (IsEmpty())
-	{
-		return false;
-	}
-
-	return spatialReference->IsLocal() != 0;
-}
-
-void GeoCrs::SetTraditionalGisAxisOrder(bool enable)
-{
-	if (useTraditionalGisAxisOrder == enable)
-	{
-		return;
-	}
-
-	useTraditionalGisAxisOrder = enable;
-
-	if (spatialReference)
-	{
-		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
-	}
-
-	InvalidateCaches();
-}
-
-std::string GeoCrs::ExportToWktUtf8(WktFormat format, bool multiline) const
-{
-	if (IsEmpty())
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToWktUtf8】变量为空。"));
-		return "";
-	}
-
-	const char* formatOption = nullptr;
-	switch (format)
-	{
-	case WktFormat::Default:
-		formatOption = nullptr;
-		break;
-	case WktFormat::Wkt1Gdal:
-		formatOption = "FORMAT=WKT1_GDAL";
-		break;
-	case WktFormat::Wkt1Esri:
-		formatOption = "FORMAT=WKT1_ESRI";
-		break;
-	case WktFormat::Wkt2_2015:
-		formatOption = "FORMAT=WKT2_2015";
-		break;
-	case WktFormat::Wkt2_2018:
-		formatOption = "FORMAT=WKT2_2018";
-		break;
-	case WktFormat::Wkt2:
-		formatOption = "FORMAT=WKT2";
-		break;
-	default:
-		formatOption = "FORMAT=WKT2_2018";
-		break;
-	}
-
-	const char* const multilineOption = multiline ? "MULTILINE=YES" : "MULTILINE=NO";
-
-	if (formatOption == nullptr)
-	{
-		const char* const options[] = { multilineOption, nullptr };
-		return ExportSrsToWktUtf8(*spatialReference, options);
-	}
-
-	const char* const options[] = { formatOption, multilineOption, nullptr };
-	return ExportSrsToWktUtf8(*spatialReference, options);
-}
-
-std::string GeoCrs::ExportToPrettyWktUtf8(bool simplify) const
-{
-	if (IsEmpty())
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToPrettyWktUtf8】变量为空。"));
-		return "";
-	}
-
-	char* wktRaw = nullptr;
-	const OGRErr err = spatialReference->exportToPrettyWkt(&wktRaw, simplify ? TRUE : FALSE);
-	CplCharPtr wkt(wktRaw);
-
-	if (err != OGRERR_NONE || wkt == nullptr)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToPrettyWktUtf8】exportToPrettyWkt 失败: err=") +
-			std::to_string(static_cast<int>(err)) +
-			GB_STR(", wkt=") +
-			(wktRaw ? std::string(wktRaw) : ""));
-		return "";
-	}
-
-	return std::string(wkt.get());
-}
-
-std::string GeoCrs::ExportToProj4Utf8() const
-{
-	if (IsEmpty())
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProj4Utf8】变量为空。"));
-		return "";
-	}
-
-	char* proj4Raw = nullptr;
-	const OGRErr err = spatialReference->exportToProj4(&proj4Raw);
-	CplCharPtr proj4(proj4Raw);
-
-	if (err != OGRERR_NONE || proj4 == nullptr)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProj4Utf8】exportToProj4 失败: err=") +
-			std::to_string(static_cast<int>(err)) +
-			GB_STR(", proj4=") +
-			(proj4Raw ? std::string(proj4Raw) : ""));
-		return "";
-	}
-
-	return std::string(proj4.get());
-}
-
-std::string GeoCrs::ExportToProjJsonUtf8() const
-{
-	if (IsEmpty())
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProjJsonUtf8】变量为空。"));
-		return "";
-	}
-
-	char* projJsonRaw = nullptr;
-	const OGRErr err = spatialReference->exportToPROJJSON(&projJsonRaw, nullptr);
-	CplCharPtr projJson(projJsonRaw);
-
-	if (err != OGRERR_NONE || projJson == nullptr)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProjJsonUtf8】exportToPROJJSON 失败: err=") +
-			std::to_string(static_cast<int>(err)) +
-			GB_STR(", projJson=") +
-			(projJsonRaw ? std::string(projJsonRaw) : ""));
-		return "";
-	}
-
-	return std::string(projJson.get());
-}
-
-int GeoCrs::TryGetEpsgCode(bool tryAutoIdentify, bool tryFindBestMatch, int minMatchConfidence) const
-{
-	if (IsEmpty())
+	if (IsEmptyNoLock())
 	{
 		GBLOG_WARNING(GB_STR("【GeoCrs::TryGetEpsgCode】变量为空。"));
 		return 0;
@@ -846,78 +446,60 @@ int GeoCrs::TryGetEpsgCode(bool tryAutoIdentify, bool tryFindBestMatch, int minM
 		hasCachedDefaultEpsgCode = true;
 	}
 
-	GBLOG_WARNING(GB_STR("【GeoCrs::TryGetEpsgCode】无法找到 EPSG Code。"));
 	return 0;
 }
 
-std::string GeoCrs::ToEpsgStringUtf8() const
+std::string GeoCrs::ExportToWktUtf8NoLock(WktFormat format, bool multiline) const
 {
-	const int epsgCode = TryGetEpsgCode(true);
-	if (epsgCode <= 0)
+	if (IsEmptyNoLock())
 	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::ToEpsgStringUtf8】epsgCode 无效。"));
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToWktUtf8】变量为空。"));
 		return "";
 	}
 
-	return std::string("EPSG:") + std::to_string(epsgCode);
-}
-
-std::string GeoCrs::ToOgcUrnStringUtf8() const
-{
-	if (IsEmpty())
+	const char* formatOption = nullptr;
+	switch (format)
 	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::ToOgcUrnStringUtf8】对象为空。"));
-		return "";
+	case WktFormat::Default:
+		formatOption = nullptr;
+		break;
+	case WktFormat::Wkt1Gdal:
+		formatOption = "FORMAT=WKT1_GDAL";
+		break;
+	case WktFormat::Wkt1Esri:
+		formatOption = "FORMAT=WKT1_ESRI";
+		break;
+	case WktFormat::Wkt2_2015:
+		formatOption = "FORMAT=WKT2_2015";
+		break;
+	case WktFormat::Wkt2_2018:
+		formatOption = "FORMAT=WKT2_2018";
+		break;
+	case WktFormat::Wkt2:
+		formatOption = "FORMAT=WKT2";
+		break;
+	default:
+		formatOption = "FORMAT=WKT2_2018";
+		break;
 	}
 
-	char* urnRaw = spatialReference->GetOGCURN();
-	CplCharPtr urn(urnRaw);
-	if (urn == nullptr)
+	const char* const multilineOption = multiline ? "MULTILINE=YES" : "MULTILINE=NO";
+
+	if (formatOption == nullptr)
 	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::ToOgcUrnStringUtf8】空的 urn。"));
-		return "";
+		const char* const options[] = { multilineOption, nullptr };
+		return ExportSrsToWktUtf8(*spatialReference, options);
 	}
 
-	return std::string(urn.get());
+	const char* const options[] = { formatOption, multilineOption, nullptr };
+	return ExportSrsToWktUtf8(*spatialReference, options);
 }
 
-GeoCrs::UnitsInfo GeoCrs::GetLinearUnits() const
-{
-	UnitsInfo info;
-	if (IsEmpty())
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::GetLinearUnits】对象为空。"));
-		return info;
-	}
-
-	const char* unitName = nullptr;
-	const double toMeters = spatialReference->GetLinearUnits(&unitName);
-	info.toSI = toMeters;
-	info.nameUtf8 = unitName ? std::string(unitName) : std::string();
-	return info;
-}
-
-GeoCrs::UnitsInfo GeoCrs::GetAngularUnits() const
-{
-	UnitsInfo info;
-	if (IsEmpty())
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::GetAngularUnits】对象为空。"));
-		return info;
-	}
-
-	const char* unitName = nullptr;
-	const double toRadians = spatialReference->GetAngularUnits(&unitName);
-	info.toSI = toRadians;
-	info.nameUtf8 = unitName ? std::string(unitName) : std::string();
-	return info;
-}
-
-std::vector<GeoCrs::LonLatAreaSegment> GeoCrs::GetValidAreaLonLatSegments() const
+std::vector<GeoCrs::LonLatAreaSegment> GeoCrs::GetValidAreaLonLatSegmentsNoLock() const
 {
 	std::vector<LonLatAreaSegment> segments;
 
-	if (IsEmpty())
+	if (IsEmptyNoLock())
 	{
 		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLatSegments】对象为空。"));
 		return segments;
@@ -990,22 +572,73 @@ std::vector<GeoCrs::LonLatAreaSegment> GeoCrs::GetValidAreaLonLatSegments() cons
 	return segments;
 }
 
-GeoBoundingBox GeoCrs::GetValidArea() const
+GeoBoundingBox GeoCrs::GetValidAreaLonLatNoLock() const
 {
-	if (IsEmpty())
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLat】对象为空。"));
+		return MakeInvalidGeoBoundingBox();
+	}
+
+	const std::vector<LonLatAreaSegment> segments = GetValidAreaLonLatSegmentsNoLock();
+	if (segments.empty())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLat】segments为空。"));
+		return MakeInvalidGeoBoundingBox();
+	}
+
+	double west = segments[0].west;
+	double south = segments[0].south;
+	double east = segments[0].east;
+	double north = segments[0].north;
+
+	if (segments.size() > 1)
+	{
+		// GeoBoundingBox 只能表达一个矩形。跨日期变更线时，取保守的全球经度范围。
+		west = -180.0;
+		east = 180.0;
+
+		for (const LonLatAreaSegment& seg : segments)
+		{
+			south = std::min(south, seg.south);
+			north = std::max(north, seg.north);
+		}
+	}
+
+	OGRSpatialReference epsg4326;
+	if (epsg4326.importFromEPSG(4326) != OGRERR_NONE)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLat】WGS 84 坐标系导入失败。"));
+		return MakeInvalidGeoBoundingBox();
+	}
+	EnsureTraditionalGisAxisOrder(epsg4326);
+
+	const char* const options[] = { "FORMAT=WKT2_2018", "MULTILINE=NO", nullptr };
+
+	GeoBoundingBox result;
+	result.wktUtf8 = ExportSrsToWktUtf8(epsg4326, options);
+	result.rect = GB_Rectangle(west, south, east, north);
+	return result;
+}
+
+GeoBoundingBox GeoCrs::GetValidAreaNoLock() const
+{
+	if (IsEmptyNoLock())
 	{
 		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidArea】对象为空。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 
 	// ---- Geographic CRS：直接返回经纬度范围（注意：跨日期线时 GetValidAreaLonLat() 会返回保守的全球经度范围）----
-	if (IsGeographic())
+	if (spatialReference->IsGeographic() != 0)
 	{
-		GeoBoundingBox lonLatArea = GetValidAreaLonLat();
+		GeoBoundingBox lonLatArea = GetValidAreaLonLatNoLock();
+		const std::string selfWkt = ExportToWktUtf8NoLock(WktFormat::Wkt2_2018, false);
+
 		if (!lonLatArea.IsValid())
 		{
 			GeoBoundingBox fallback;
-			fallback.wktUtf8 = ExportToWktUtf8(WktFormat::Wkt2_2018, false);
+			fallback.wktUtf8 = selfWkt;
 			fallback.rect = useTraditionalGisAxisOrder
 				? GB_Rectangle(-180.0, -90.0, 180.0, 90.0)   // X=经度, Y=纬度
 				: GB_Rectangle(-90.0, -180.0, 90.0, 180.0);  // X=纬度, Y=经度（权威机构顺序）
@@ -1014,7 +647,7 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 		}
 
 		GeoBoundingBox result = lonLatArea;
-		result.wktUtf8 = ExportToWktUtf8(WktFormat::Wkt2_2018, false);
+		result.wktUtf8 = selfWkt;
 
 		if (!useTraditionalGisAxisOrder)
 		{
@@ -1026,7 +659,7 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 	}
 
 	// ---- Projected/Local CRS：以经纬度 area of use 采样，再投影到目标 CRS 以估算其有效范围 ----
-	const std::vector<LonLatAreaSegment> lonLatSegments = GetValidAreaLonLatSegments();
+	const std::vector<LonLatAreaSegment> lonLatSegments = GetValidAreaLonLatSegmentsNoLock();
 	if (lonLatSegments.empty())
 	{
 		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidArea】lonLatSegments为空。"));
@@ -1130,7 +763,7 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 	}
 
 	GeoBoundingBox result;
-	result.wktUtf8 = ExportToWktUtf8(WktFormat::Wkt2_2018, false);
+	result.wktUtf8 = ExportToWktUtf8NoLock(WktFormat::Wkt2_2018, false);
 	result.rect = GB_Rectangle(minX, minY, maxX, maxY);
 
 	// 若采用权威轴序，且该投影 CRS 定义为 northing/easting，则交换 X/Y。
@@ -1142,62 +775,582 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 	return result;
 }
 
-GeoBoundingBox GeoCrs::GetValidAreaLonLat() const
+
+GeoCrs::~GeoCrs() = default;
+
+GeoCrs& GeoCrs::operator=(const GeoCrs& other)
 {
-	if (IsEmpty())
+	if (this == &other)
 	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLat】对象为空。"));
-		return MakeInvalidGeoBoundingBox();
+		return *this;
 	}
 
-	const std::vector<LonLatAreaSegment> segments = GetValidAreaLonLatSegments();
-	if (segments.empty())
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	std::lock_guard<std::recursive_mutex> otherLock(other.mutex);
+
+	std::unique_ptr<OGRSpatialReference, GeoCrsOgrSrsDeleter> newSrs(nullptr);
+	if (other.spatialReference)
 	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLat】segments为空。"));
-		return MakeInvalidGeoBoundingBox();
+		newSrs.reset(other.spatialReference->Clone());
+	}
+	else
+	{
+		newSrs.reset(CreateOgrSpatialReference());
 	}
 
-	double west = segments[0].west;
-	double south = segments[0].south;
-	double east = segments[0].east;
-	double north = segments[0].north;
+	spatialReference.swap(newSrs);
+	useTraditionalGisAxisOrder = other.useTraditionalGisAxisOrder;
 
-	if (segments.size() > 1)
+	if (spatialReference)
 	{
-		// GeoBoundingBox 只能表达一个矩形。跨日期变更线时，取保守的全球经度范围。
-		west = -180.0;
-		east = 180.0;
+		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
+	}
 
-		for (const LonLatAreaSegment& seg : segments)
+	InvalidateCachesNoLock();
+	return *this;
+}
+
+
+GeoCrs& GeoCrs::operator=(GeoCrs&& other) noexcept
+{
+	if (this == &other)
+	{
+		return *this;
+	}
+
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	std::lock_guard<std::recursive_mutex> otherLock(other.mutex);
+
+	spatialReference = std::move(other.spatialReference);
+	useTraditionalGisAxisOrder = other.useTraditionalGisAxisOrder;
+
+	if (spatialReference)
+	{
+		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
+	}
+
+	InvalidateCachesNoLock();
+
+	// 保持被移动对象可用
+	other.useTraditionalGisAxisOrder = true;
+	if (other.spatialReference == nullptr)
+	{
+		other.spatialReference.reset(CreateOgrSpatialReference());
+		if (other.spatialReference)
 		{
-			south = std::min(south, seg.south);
-			north = std::max(north, seg.north);
+			ApplyAxisOrderStrategy(*other.spatialReference, other.useTraditionalGisAxisOrder);
 		}
 	}
+	other.InvalidateCachesNoLock();
 
-	OGRSpatialReference epsg4326;
-	if (epsg4326.importFromEPSG(4326) != OGRERR_NONE)
-	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLat】WGS 84 坐标系导入失败。"));
-		return MakeInvalidGeoBoundingBox();
-	}
-	EnsureTraditionalGisAxisOrder(epsg4326);
-
-	const char* const options[] = { "FORMAT=WKT2_2018", "MULTILINE=NO", nullptr };
-
-	GeoBoundingBox result;
-	result.wktUtf8 = ExportSrsToWktUtf8(epsg4326, options);
-	result.rect = GB_Rectangle(west, south, east, north);
-	return result;
+	return *this;
 }
+
+
+GeoCrs GeoCrs::CreateFromWkt(const std::string& wktUtf8)
+{
+	GeoCrs crs;
+	crs.SetFromWkt(wktUtf8);
+	return crs;
+}
+
+GeoCrs GeoCrs::CreateFromEpsgCode(int epsgCode)
+{
+	GeoCrs crs;
+	crs.SetFromEpsgCode(epsgCode);
+	return crs;
+}
+
+GeoCrs GeoCrs::CreateFromUserInput(const std::string& definitionUtf8, bool allowNetworkAccess, bool allowFileAccess)
+{
+	GeoCrs crs;
+	crs.SetFromUserInput(definitionUtf8, allowNetworkAccess, allowFileAccess);
+	return crs;
+}
+
+bool GeoCrs::Reset()
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	return ResetNoLock();
+}
+
+
+bool GeoCrs::SetFromWkt(const std::string& wktUtf8)
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+
+	ResetNoLock();
+
+	const std::string trimmed = GB_Utf8Trim(wktUtf8);
+	if (trimmed.empty())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromWkt】wkt为空。"));
+		return false;
+	}
+
+	OGRSpatialReference* srs = EnsureSpatialReferenceNoLock();
+	if (srs == nullptr)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromWkt】空的 srs。"));
+		return false;
+	}
+
+	const char* wkt = trimmed.c_str();
+	const OGRErr err = srs->importFromWkt(&wkt);
+	if (err != OGRERR_NONE)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromWkt】importFromWkt失败: err=") + std::to_string(static_cast<int>(err)));
+		ResetNoLock();
+		return false;
+	}
+
+	ApplyAxisOrderStrategy(*srs, useTraditionalGisAxisOrder);
+	InvalidateCachesNoLock();
+	return IsValidNoLock();
+}
+
+
+bool GeoCrs::SetFromEpsgCode(int epsgCode)
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+
+	ResetNoLock();
+
+	if (epsgCode <= 0)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromEpsgCode】epsgCode无效: ") + std::to_string(epsgCode));
+		return false;
+	}
+
+	OGRSpatialReference* srs = EnsureSpatialReferenceNoLock();
+	if (srs == nullptr)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromEpsgCode】空的 srs。"));
+		return false;
+	}
+
+	const OGRErr err = srs->importFromEPSG(epsgCode);
+	if (err != OGRERR_NONE)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromEpsgCode】importFromEPSG失败: err=") + std::to_string(static_cast<int>(err)));
+		ResetNoLock();
+		return false;
+	}
+
+	ApplyAxisOrderStrategy(*srs, useTraditionalGisAxisOrder);
+	InvalidateCachesNoLock();
+	return IsValidNoLock();
+}
+
+
+bool GeoCrs::SetFromUserInput(const std::string& definitionUtf8, bool allowNetworkAccess, bool allowFileAccess)
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+
+	ResetNoLock();
+
+	const std::string trimmed = GB_Utf8Trim(definitionUtf8);
+	if (trimmed.empty())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】definition为空。"));
+		return false;
+	}
+
+	OGRSpatialReference* srs = EnsureSpatialReferenceNoLock();
+	if (srs == nullptr)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】空的 srs。"));
+		return false;
+	}
+
+	if (allowNetworkAccess)
+	{
+		CPLSetConfigOption("OSR_ENABLE_NETWORK", "YES");
+	}
+	else
+	{
+		CPLSetConfigOption("OSR_ENABLE_NETWORK", "NO");
+	}
+
+	if (allowFileAccess)
+	{
+		CPLSetConfigOption("OSR_ENABLE_FILE_ACCESS", "YES");
+	}
+	else
+	{
+		CPLSetConfigOption("OSR_ENABLE_FILE_ACCESS", "NO");
+	}
+
+	const OGRErr err = srs->SetFromUserInput(trimmed.c_str());
+	if (err != OGRERR_NONE)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】SetFromUserInput失败: err=") + std::to_string(static_cast<int>(err)) +
+			GB_STR(", definition=") + trimmed);
+		ResetNoLock();
+		return false;
+	}
+
+	ApplyAxisOrderStrategy(*srs, useTraditionalGisAxisOrder);
+	InvalidateCachesNoLock();
+	return IsValidNoLock();
+}
+
+
+bool GeoCrs::IsEmpty() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	return IsEmptyNoLock();
+}
+
+
+bool GeoCrs::IsValid() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	return IsValidNoLock();
+}
+
+
+std::string GeoCrs::GetNameUtf8() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetNameUtf8】变量为空。"));
+		return "";
+	}
+
+	const char* name = spatialReference->GetName();
+	return name ? std::string(name) : std::string();
+}
+
+
+std::string GeoCrs::GetUidUtf8() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetUidUtf8】变量为空。"));
+		return "";
+	}
+
+	// 命中缓存
+	if (cachedUidKind != -2)
+	{
+		if (cachedUidKind < 0)
+		{
+			return "";
+		}
+		if (cachedUidKind > 0)
+		{
+			return "EPSG:" + std::to_string(cachedUidKind);
+		}
+
+		return "WKT2_2018_HASH:" + ToHex64(cachedUidWktHash);
+	}
+
+	const int epsgCode = TryGetEpsgCodeNoLock(true, false, 90);
+	if (epsgCode > 0)
+	{
+		cachedUidKind = epsgCode;
+		cachedUidWktHash = 0;
+		return "EPSG:" + std::to_string(epsgCode);
+	}
+
+	const std::string wkt = ExportToWktUtf8NoLock(WktFormat::Wkt2_2018, false);
+	if (wkt.empty())
+	{
+		cachedUidKind = -1;
+		cachedUidWktHash = 0;
+		return "";
+	}
+
+	const std::uint64_t wktHash = Fnv1a64(wkt.data(), wkt.size());
+	cachedUidKind = 0;
+	cachedUidWktHash = wktHash;
+	return "WKT2_2018_HASH:" + ToHex64(wktHash);
+}
+
+
+bool GeoCrs::operator==(const GeoCrs& other) const
+{
+	if (this == &other)
+	{
+		return true;
+	}
+
+	const GeoCrs* first = this;
+	const GeoCrs* second = &other;
+
+	// 规避死锁：按地址顺序加锁
+	if (std::less<const GeoCrs*>()(second, first))
+	{
+		std::swap(first, second);
+	}
+
+	std::lock_guard<std::recursive_mutex> firstLock(first->mutex);
+	std::lock_guard<std::recursive_mutex> secondLock(second->mutex);
+
+	const bool thisEmpty = this->IsEmptyNoLock();
+	const bool otherEmpty = other.IsEmptyNoLock();
+	if (thisEmpty && otherEmpty)
+	{
+		return true;
+	}
+	if (thisEmpty != otherEmpty)
+	{
+		return false;
+	}
+
+	return spatialReference->IsSame(other.spatialReference.get());
+}
+
+
+bool GeoCrs::operator!=(const GeoCrs& other) const
+{
+	return !(*this == other);
+}
+
+bool GeoCrs::IsGeographic() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::IsGeographic】变量为空。"));
+		return false;
+	}
+
+	return spatialReference->IsGeographic() != 0;
+}
+
+
+bool GeoCrs::IsProjected() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::IsProjected】变量为空。"));
+		return false;
+	}
+
+	return spatialReference->IsProjected() != 0;
+}
+
+
+bool GeoCrs::IsLocal() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::IsLocal】变量为空。"));
+		return false;
+	}
+
+	return spatialReference->IsLocal() != 0;
+}
+
+
+void GeoCrs::SetTraditionalGisAxisOrder(bool enable)
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	useTraditionalGisAxisOrder = enable;
+
+	if (spatialReference)
+	{
+		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
+	}
+
+	InvalidateCachesNoLock();
+}
+
+
+std::string GeoCrs::ExportToWktUtf8(WktFormat format, bool multiline) const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	return ExportToWktUtf8NoLock(format, multiline);
+}
+
+
+std::string GeoCrs::ExportToPrettyWktUtf8(bool simplify) const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToPrettyWktUtf8】变量为空。"));
+		return "";
+	}
+
+	char* wktRaw = nullptr;
+	const OGRErr err = spatialReference->exportToPrettyWkt(&wktRaw, simplify ? TRUE : FALSE);
+	CplCharPtr wkt(wktRaw);
+
+	if (err != OGRERR_NONE || wkt == nullptr)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToPrettyWktUtf8】exportToPrettyWkt 失败: err=") +
+			std::to_string(static_cast<int>(err)) +
+			GB_STR(", wkt=") +
+			(wktRaw ? std::string(wktRaw) : ""));
+		return "";
+	}
+
+	return std::string(wkt.get());
+}
+
+std::string GeoCrs::ExportToProj4Utf8() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProj4Utf8】变量为空。"));
+		return "";
+	}
+
+	char* proj4Raw = nullptr;
+	const OGRErr err = spatialReference->exportToProj4(&proj4Raw);
+	CplCharPtr proj4(proj4Raw);
+
+	if (err != OGRERR_NONE || proj4 == nullptr)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProj4Utf8】exportToProj4 失败: err=") +
+			std::to_string(static_cast<int>(err)) +
+			GB_STR(", proj4=") +
+			(proj4Raw ? std::string(proj4Raw) : ""));
+		return "";
+	}
+
+	return std::string(proj4.get());
+}
+
+std::string GeoCrs::ExportToProjJsonUtf8() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProjJsonUtf8】变量为空。"));
+		return "";
+	}
+
+	char* projJsonRaw = nullptr;
+	const OGRErr err = spatialReference->exportToPROJJSON(&projJsonRaw, nullptr);
+	CplCharPtr projJson(projJsonRaw);
+
+	if (err != OGRERR_NONE || projJson == nullptr)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProjJsonUtf8】exportToPROJJSON 失败: err=") +
+			std::to_string(static_cast<int>(err)) +
+			GB_STR(", projJson=") +
+			(projJsonRaw ? std::string(projJsonRaw) : ""));
+		return "";
+	}
+
+	return std::string(projJson.get());
+}
+
+int GeoCrs::TryGetEpsgCode(bool tryAutoIdentify, bool tryFindBestMatch, int minMatchConfidence) const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	return TryGetEpsgCodeNoLock(tryAutoIdentify, tryFindBestMatch, minMatchConfidence);
+}
+
+
+std::string GeoCrs::ToEpsgStringUtf8() const
+{
+	const int epsgCode = TryGetEpsgCode(true);
+	if (epsgCode <= 0)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ToEpsgStringUtf8】未能获取 EPSG code。"));
+		return "";
+	}
+	return "EPSG:" + std::to_string(epsgCode);
+}
+
+
+std::string GeoCrs::ToOgcUrnStringUtf8() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ToOgcUrnStringUtf8】对象为空。"));
+		return "";
+	}
+
+	char* urnRaw = spatialReference->GetOGCURN();
+	CplCharPtr urn(urnRaw);
+	if (urn == nullptr)
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ToOgcUrnStringUtf8】空的 urn。"));
+		return "";
+	}
+
+	return std::string(urn.get());
+}
+
+GeoCrs::UnitsInfo GeoCrs::GetLinearUnits() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	UnitsInfo info;
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetLinearUnits】对象为空。"));
+		return info;
+	}
+
+	const char* unitName = nullptr;
+	const double toMeters = spatialReference->GetLinearUnits(&unitName);
+	info.toSI = toMeters;
+	info.nameUtf8 = unitName ? std::string(unitName) : std::string();
+	return info;
+}
+
+
+GeoCrs::UnitsInfo GeoCrs::GetAngularUnits() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	UnitsInfo info;
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetAngularUnits】对象为空。"));
+		return info;
+	}
+
+	const char* unitName = nullptr;
+	const double toRadians = spatialReference->GetAngularUnits(&unitName);
+	info.toSI = toRadians;
+	info.nameUtf8 = unitName ? std::string(unitName) : std::string();
+	return info;
+}
+
+
+std::vector<GeoCrs::LonLatAreaSegment> GeoCrs::GetValidAreaLonLatSegments() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	return GetValidAreaLonLatSegmentsNoLock();
+}
+
+
+GeoBoundingBox GeoCrs::GetValidArea() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	return GetValidAreaNoLock();
+}
+
+
+GeoBoundingBox GeoCrs::GetValidAreaLonLat() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	return GetValidAreaLonLatNoLock();
+}
+
 
 const OGRSpatialReference* GeoCrs::GetConst() const
 {
+	std::lock_guard<std::recursive_mutex> lock(mutex);
 	return spatialReference.get();
 }
 
 const OGRSpatialReference& GeoCrs::GetConstRef() const
 {
+	std::lock_guard<std::recursive_mutex> lock(mutex);
 	// 约定上 spatialReference 在构造/Reset 后都应存在；此处仍做兜底，避免空指针解引用。
 	if (spatialReference == nullptr)
 	{
@@ -1210,33 +1363,34 @@ const OGRSpatialReference& GeoCrs::GetConstRef() const
 
 OGRSpatialReference& GeoCrs::GetRef()
 {
-	OGRSpatialReference* srs = Get();
-	// Get() 保证返回非空（除非底层创建失败），这里按“不抛异常”风格做最后兜底。
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+
+	OGRSpatialReference* srs = EnsureSpatialReferenceNoLock();
 	if (srs == nullptr)
 	{
-		static OGRSpatialReference emptySrs;
-		return emptySrs;
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetRef】空的 srs。"));
+
+		static OGRSpatialReference empty;
+		return empty;
 	}
+
+	InvalidateCachesNoLock();
 	return *srs;
 }
 
+
 OGRSpatialReference* GeoCrs::Get()
 {
-	const bool needCreate = (spatialReference == nullptr);
+	std::lock_guard<std::recursive_mutex> lock(mutex);
 
-	if (needCreate)
+	OGRSpatialReference* srs = EnsureSpatialReferenceNoLock();
+	if (srs == nullptr)
 	{
-		spatialReference.reset(CreateOgrSpatialReference());
+		GBLOG_WARNING(GB_STR("【GeoCrs::Get】空的 srs。"));
+		return nullptr;
 	}
 
-	if (needCreate && spatialReference)
-	{
-		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
-	}
-
-	// 由于返回的是可写指针，调用方可能修改内部 SRS。
-	// 为避免缓存被“外部修改”污染，这里统一将缓存置为失效。
-	InvalidateCaches();
-
-	return spatialReference.get();
+	InvalidateCachesNoLock();
+	return srs;
 }
+
