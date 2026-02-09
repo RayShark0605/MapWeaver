@@ -1,11 +1,10 @@
 ﻿#include "GeoCrs.h"
-
 #include "GeoBoundingBox.h"
-
 #include "Geometry/GB_Point2d.h"
 #include "Geometry/GB_Rectangle.h"
+#include "GB_Logger.h"
 
-#include "cpl_conv.h" // CPLFree
+#include "cpl_conv.h"
 #include "ogr_spatialref.h"
 #include "ogr_srs_api.h"
 
@@ -251,8 +250,7 @@ void GeoCrsOgrSrsDeleter::operator()(OGRSpatialReference* srs) const noexcept
 	srs->Release();
 }
 
-GeoCrs::GeoCrs()
-	: spatialReference(nullptr)
+GeoCrs::GeoCrs(): spatialReference(nullptr)
 {
 	spatialReference.reset(CreateOgrSpatialReference());
 	if (spatialReference)
@@ -263,9 +261,7 @@ GeoCrs::GeoCrs()
 	InvalidateCaches();
 }
 
-GeoCrs::GeoCrs(const GeoCrs& other)
-	: spatialReference(nullptr),
-	useTraditionalGisAxisOrder(other.useTraditionalGisAxisOrder)
+GeoCrs::GeoCrs(const GeoCrs& other) : spatialReference(nullptr), useTraditionalGisAxisOrder(other.useTraditionalGisAxisOrder)
 {
 	if (other.spatialReference)
 	{
@@ -284,9 +280,7 @@ GeoCrs::GeoCrs(const GeoCrs& other)
 	InvalidateCaches();
 }
 
-GeoCrs::GeoCrs(GeoCrs&& other) noexcept
-	: spatialReference(std::move(other.spatialReference)),
-	useTraditionalGisAxisOrder(other.useTraditionalGisAxisOrder)
+GeoCrs::GeoCrs(GeoCrs&& other) noexcept : spatialReference(std::move(other.spatialReference)), useTraditionalGisAxisOrder(other.useTraditionalGisAxisOrder)
 {
 	if (spatialReference)
 	{
@@ -407,6 +401,7 @@ bool GeoCrs::Reset()
 	OGRSpatialReference* srs = Get();
 	if (srs == nullptr)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::Reset】空的 srs。"));
 		InvalidateCaches();
 		return false;
 	}
@@ -423,18 +418,21 @@ bool GeoCrs::SetFromWkt(const std::string& wktUtf8)
 
 	if (wktUtf8.empty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromWkt】空的 wktUtf8。"));
 		return false;
 	}
 
 	OGRSpatialReference* srs = Get();
 	if (srs == nullptr)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromWkt】空的 srs。"));
 		return false;
 	}
 
 	const OGRErr err = srs->importFromWkt(wktUtf8.c_str());
 	if (err != OGRERR_NONE)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromWkt】importFromWkt 出错: ") + std::to_string(static_cast<int>(err)));
 		Reset();
 		return false;
 	}
@@ -450,18 +448,21 @@ bool GeoCrs::SetFromEpsgCode(int epsgCode)
 
 	if (epsgCode <= 0)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromEpsgCode】epsgCode非正: ") + std::to_string(epsgCode));
 		return false;
 	}
 
 	OGRSpatialReference* srs = Get();
 	if (srs == nullptr)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromEpsgCode】空的 srs。"));
 		return false;
 	}
 
 	const OGRErr err = srs->importFromEPSG(epsgCode);
 	if (err != OGRERR_NONE)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromEpsgCode】importFromWkt 出错: ") + std::to_string(static_cast<int>(err)));
 		Reset();
 		return false;
 	}
@@ -477,12 +478,14 @@ bool GeoCrs::SetFromUserInput(const std::string& definitionUtf8, bool allowNetwo
 
 	if (definitionUtf8.empty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】definitionUtf8 为空。"));
 		return false;
 	}
 
 	OGRSpatialReference* srs = Get();
 	if (srs == nullptr)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】srs 为空。"));
 		return false;
 	}
 
@@ -496,6 +499,7 @@ bool GeoCrs::SetFromUserInput(const std::string& definitionUtf8, bool allowNetwo
 	const OGRErr err = srs->SetFromUserInput(definitionUtf8.c_str(), options);
 	if (err != OGRERR_NONE)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】SetFromUserInput 出错: ") + std::to_string(static_cast<int>(err)));
 		Reset();
 		return false;
 	}
@@ -529,6 +533,7 @@ std::string GeoCrs::GetNameUtf8() const
 {
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetNameUtf8】变量为空。"));
 		return "";
 	}
 
@@ -540,6 +545,7 @@ std::string GeoCrs::GetUidUtf8() const
 {
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetNameUtf8】变量为空。"));
 		return "";
 	}
 
@@ -556,6 +562,7 @@ std::string GeoCrs::GetUidUtf8() const
 			return std::string("WKT2_2018:FNV1A64:") + ToHex64(cachedUidWktHash);
 		}
 
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetNameUtf8】未知的 cachedUidKind。"));
 		return "";
 	}
 
@@ -569,6 +576,7 @@ std::string GeoCrs::GetUidUtf8() const
 	const std::string wkt = ExportToWktUtf8(WktFormat::Wkt2_2018, false);
 	if (wkt.empty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetNameUtf8】ExportToWktUtf8 结果为空。"));
 		cachedUidKind = -1;
 		return "";
 	}
@@ -660,6 +668,7 @@ std::string GeoCrs::ExportToWktUtf8(WktFormat format, bool multiline) const
 {
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToWktUtf8】变量为空。"));
 		return "";
 	}
 
@@ -705,6 +714,7 @@ std::string GeoCrs::ExportToPrettyWktUtf8(bool simplify) const
 {
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToPrettyWktUtf8】变量为空。"));
 		return "";
 	}
 
@@ -714,6 +724,10 @@ std::string GeoCrs::ExportToPrettyWktUtf8(bool simplify) const
 
 	if (err != OGRERR_NONE || wkt == nullptr)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToPrettyWktUtf8】exportToPrettyWkt 失败: err=") +
+			std::to_string(static_cast<int>(err)) +
+			GB_STR(", wkt=") +
+			(wktRaw ? std::string(wktRaw) : ""));
 		return "";
 	}
 
@@ -724,6 +738,7 @@ std::string GeoCrs::ExportToProj4Utf8() const
 {
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProj4Utf8】变量为空。"));
 		return "";
 	}
 
@@ -733,6 +748,10 @@ std::string GeoCrs::ExportToProj4Utf8() const
 
 	if (err != OGRERR_NONE || proj4 == nullptr)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProj4Utf8】exportToProj4 失败: err=") +
+			std::to_string(static_cast<int>(err)) +
+			GB_STR(", proj4=") +
+			(proj4Raw ? std::string(proj4Raw) : ""));
 		return "";
 	}
 
@@ -743,6 +762,7 @@ std::string GeoCrs::ExportToProjJsonUtf8() const
 {
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProjJsonUtf8】变量为空。"));
 		return "";
 	}
 
@@ -752,6 +772,10 @@ std::string GeoCrs::ExportToProjJsonUtf8() const
 
 	if (err != OGRERR_NONE || projJson == nullptr)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ExportToProjJsonUtf8】exportToPROJJSON 失败: err=") +
+			std::to_string(static_cast<int>(err)) +
+			GB_STR(", projJson=") +
+			(projJsonRaw ? std::string(projJsonRaw) : ""));
 		return "";
 	}
 
@@ -762,6 +786,7 @@ int GeoCrs::TryGetEpsgCode(bool tryAutoIdentify, bool tryFindBestMatch, int minM
 {
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::TryGetEpsgCode】变量为空。"));
 		return 0;
 	}
 
@@ -821,14 +846,16 @@ int GeoCrs::TryGetEpsgCode(bool tryAutoIdentify, bool tryFindBestMatch, int minM
 		hasCachedDefaultEpsgCode = true;
 	}
 
+	GBLOG_WARNING(GB_STR("【GeoCrs::TryGetEpsgCode】无法找到 EPSG Code。"));
 	return 0;
 }
 
 std::string GeoCrs::ToEpsgStringUtf8() const
 {
-	const int epsgCode = TryGetEpsgCode(true, false, 90);
+	const int epsgCode = TryGetEpsgCode(true);
 	if (epsgCode <= 0)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ToEpsgStringUtf8】epsgCode 无效。"));
 		return "";
 	}
 
@@ -839,6 +866,7 @@ std::string GeoCrs::ToOgcUrnStringUtf8() const
 {
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ToOgcUrnStringUtf8】对象为空。"));
 		return "";
 	}
 
@@ -846,6 +874,7 @@ std::string GeoCrs::ToOgcUrnStringUtf8() const
 	CplCharPtr urn(urnRaw);
 	if (urn == nullptr)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::ToOgcUrnStringUtf8】空的 urn。"));
 		return "";
 	}
 
@@ -857,6 +886,7 @@ GeoCrs::UnitsInfo GeoCrs::GetLinearUnits() const
 	UnitsInfo info;
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetLinearUnits】对象为空。"));
 		return info;
 	}
 
@@ -872,6 +902,7 @@ GeoCrs::UnitsInfo GeoCrs::GetAngularUnits() const
 	UnitsInfo info;
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetAngularUnits】对象为空。"));
 		return info;
 	}
 
@@ -888,23 +919,26 @@ std::vector<GeoCrs::LonLatAreaSegment> GeoCrs::GetValidAreaLonLatSegments() cons
 
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLatSegments】对象为空。"));
 		return segments;
 	}
 
-	double west = 0.0;
-	double south = 0.0;
-	double east = 0.0;
-	double north = 0.0;
+	double west = 0;
+	double south = 0;
+	double east = 0;
+	double north = 0;
 	const char* areaName = nullptr;
 
 	const bool ok = spatialReference->GetAreaOfUse(&west, &south, &east, &north, &areaName);
 	if (!ok)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLatSegments】GetAreaOfUse 失败。"));
 		return segments;
 	}
 
 	if (IsUnknownAreaOfUseValue(west) || IsUnknownAreaOfUseValue(south) || IsUnknownAreaOfUseValue(east) || IsUnknownAreaOfUseValue(north))
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLatSegments】未知区域。"));
 		return segments;
 	}
 
@@ -960,6 +994,7 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 {
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidArea】对象为空。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 
@@ -974,6 +1009,7 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 			fallback.rect = useTraditionalGisAxisOrder
 				? GB_Rectangle(-180.0, -90.0, 180.0, 90.0)   // X=经度, Y=纬度
 				: GB_Rectangle(-90.0, -180.0, 90.0, 180.0);  // X=纬度, Y=经度（权威机构顺序）
+			GBLOG_WARNING(GB_STR("【GeoCrs::GetValidArea】GetValidAreaLonLat无效，返回全球范围。"));
 			return fallback;
 		}
 
@@ -993,12 +1029,14 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 	const std::vector<LonLatAreaSegment> lonLatSegments = GetValidAreaLonLatSegments();
 	if (lonLatSegments.empty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidArea】lonLatSegments为空。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 
 	OGRSpatialReference sourceSrs;
 	if (sourceSrs.importFromEPSG(4326) != OGRERR_NONE)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidArea】WGS 84 坐标系导入失败。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 	EnsureTraditionalGisAxisOrder(sourceSrs);
@@ -1006,6 +1044,7 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 	std::unique_ptr<OGRSpatialReference, GeoCrsOgrSrsDeleter> targetSrs(spatialReference->Clone());
 	if (!targetSrs)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidArea】坐标系克隆失败。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 
@@ -1016,6 +1055,7 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 	CoordinateTransformationPtr transform(OGRCreateCoordinateTransformation(&sourceSrs, targetSrs.get()));
 	if (transform == nullptr)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidArea】OGRCreateCoordinateTransformation 失败。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 
@@ -1045,6 +1085,7 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 	const size_t numPoints = longitudes.size();
 	if (numPoints == 0 || numPoints > static_cast<size_t>(std::numeric_limits<int>::max()))
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidArea】longitudes 为空。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 
@@ -1084,6 +1125,7 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 
 	if (!hasAnyPoint)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidArea】hasAnyPoint == false。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 
@@ -1104,12 +1146,14 @@ GeoBoundingBox GeoCrs::GetValidAreaLonLat() const
 {
 	if (IsEmpty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLat】对象为空。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 
 	const std::vector<LonLatAreaSegment> segments = GetValidAreaLonLatSegments();
 	if (segments.empty())
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLat】segments为空。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 
@@ -1134,6 +1178,7 @@ GeoBoundingBox GeoCrs::GetValidAreaLonLat() const
 	OGRSpatialReference epsg4326;
 	if (epsg4326.importFromEPSG(4326) != OGRERR_NONE)
 	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetValidAreaLonLat】WGS 84 坐标系导入失败。"));
 		return MakeInvalidGeoBoundingBox();
 	}
 	EnsureTraditionalGisAxisOrder(epsg4326);
@@ -1174,7 +1219,6 @@ OGRSpatialReference& GeoCrs::GetRef()
 	}
 	return *srs;
 }
-
 
 OGRSpatialReference* GeoCrs::Get()
 {
