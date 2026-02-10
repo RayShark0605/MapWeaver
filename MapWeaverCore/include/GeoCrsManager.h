@@ -27,7 +27,7 @@ public:
 	static std::string GetProjDbDirectoryUtf8();
 
 	// 手动设置 proj.db 所在目录，并立即应用（会清空所有缓存）。
-	// - projDatabaseDirUtf8：目录路径（UTF-8）。函数内部会尝试在该目录下检查 "proj.db"。
+	// - projDatabaseDirUtf8：目录路径或 proj.db 文件路径（UTF-8）。函数内部会尝试定位并检查 "proj.db"。
 	// 返回 true 表示设置成功并已应用；false 表示目录无效或未找到 proj.db。
 	static bool SetProjDbDirectoryUtf8(const std::string& projDatabaseDirUtf8);
 

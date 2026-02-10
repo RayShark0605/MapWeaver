@@ -46,6 +46,9 @@ public:
     static GeoCrs CreateFromUserInput(const std::string& definitionUtf8, bool allowNetworkAccess = false, bool allowFileAccess = false);
 
     // 获取唯一标识符
+    // - 若 CRS 自身带 EPSG 权威码，则返回 "EPSG:<code>"。
+    // - 否则返回 "WKT2HASH:<fnv1a64>"（基于 WKT2_2018 导出文本）。
+    // - 注意：该 UID 不会触发 AutoIdentifyEPSG/FindBestMatch 推断，避免依赖外部 proj.db 状态而导致 UID 不稳定。
     std::string GetUidUtf8() const;
 
     // 判断两个坐标系是否相同

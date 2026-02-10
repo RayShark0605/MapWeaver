@@ -31,7 +31,6 @@
 #  include <unistd.h>
 #endif
 
-// GeoBoundingBox 在 GeoCrs 的接口中使用，这里按项目结构包含。
 #include "GeoBoundingBox.h"
 
 namespace
@@ -503,7 +502,7 @@ namespace
             return false;
         }
 
-        // 兼容：PROJ_DATA 是新变量名，但很多环境仍依赖 PROJ_LIB。
+        // 兼容：PROJ_DATA 是新变量名，但很多环境仍依赖 PROJ_LIB（PROJ >= 9.1 引入 PROJ_DATA，PROJ_LIB 作为兼容回退）。
         CPLSetConfigOption("PROJ_LIB", dir.c_str());
         CPLSetConfigOption("PROJ_DATA", dir.c_str());
 
@@ -553,21 +552,47 @@ std::string GeoCrsManager::GetProjDbDirectoryUtf8()
 
 bool GeoCrsManager::SetProjDbDirectoryUtf8(const std::string& projDatabaseDirUtf8)
 {
-    const std::string dir = NormalizeDirPathUtf8(projDatabaseDirUtf8);
+    const std::string trimmed = GB_Utf8Trim(projDatabaseDirUtf8);
+    if (trimmed.empty())
+    {
+        GBLOG_WARNING(GB_STR("【GeoCrsManager::SetProjDbDirectoryUtf8】目录为空。"));
+        return false;
+    }
+
+    std::string dirCandidate = trimmed;
+    if (GB_IsFileExists(dirCandidate))
+    {
+        const std::string fileName = GB_GetFileName(dirCandidate, true);
+        std::string lowerFileName;
+        lowerFileName.reserve(fileName.size());
+        for (const char ch : fileName)
+        {
+            lowerFileName.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        }
+        if (lowerFileName == "proj.db")
+        {
+            dirCandidate = GB_GetDirectoryPath(dirCandidate);
+        }
+    }
+
+    const std::string dir = NormalizeDirPathUtf8(dirCandidate);
     if (dir.empty())
     {
         GBLOG_WARNING(GB_STR("【GeoCrsManager::SetProjDbDirectoryUtf8】目录为空。"));
         return false;
     }
 
-    if (!ApplyProjDatabaseDirectoryUtf8Internal(dir))
-    {
-        GBLOG_WARNING(GB_STR("【GeoCrsManager::SetProjDbDirectoryUtf8】未找到 proj.db: ") + dir);
-        return false;
-    }
-
+    // PROJ 搜索路径 / 配置项属于“进程级全局状态”，
+    // 与 EnsureInitializedInternal() 同步，避免并发初始化与并发覆写。
     {
         GB_WriteLockGuard guard(g_initLock);
+
+        if (!ApplyProjDatabaseDirectoryUtf8Internal(dir))
+        {
+            GBLOG_WARNING(GB_STR("【GeoCrsManager::SetProjDbDirectoryUtf8】未找到 proj.db: ") + dir);
+            return false;
+        }
+
         g_projDatabaseDirUtf8 = dir;
         g_isInitialized.store(true, std::memory_order_release);
     }

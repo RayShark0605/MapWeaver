@@ -785,28 +785,56 @@ GeoCrs& GeoCrs::operator=(const GeoCrs& other)
 		return *this;
 	}
 
-	std::lock_guard<std::recursive_mutex> lock(mutex);
-	std::lock_guard<std::recursive_mutex> otherLock(other.mutex);
+	// 先在 other 的锁保护下克隆数据，尽量缩短双对象同时被锁住的时间，规避死锁风险。
+	std::unique_ptr<OGRSpatialReference, GeoCrsOgrSrsDeleter> clonedSrs(nullptr);
+	bool otherUseTraditionalGisAxisOrder = true;
+	bool otherHasCachedDefaultEpsgCode = false;
+	int otherCachedDefaultEpsgCode = 0;
+	int otherCachedUidKind = -2;
+	std::uint64_t otherCachedUidWktHash = 0;
 
-	std::unique_ptr<OGRSpatialReference, GeoCrsOgrSrsDeleter> newSrs(nullptr);
-	if (other.spatialReference)
 	{
-		newSrs.reset(other.spatialReference->Clone());
+		std::lock_guard<std::recursive_mutex> otherLock(other.mutex);
+
+		otherUseTraditionalGisAxisOrder = other.useTraditionalGisAxisOrder;
+		otherHasCachedDefaultEpsgCode = other.hasCachedDefaultEpsgCode;
+		otherCachedDefaultEpsgCode = other.cachedDefaultEpsgCode;
+		otherCachedUidKind = other.cachedUidKind;
+		otherCachedUidWktHash = other.cachedUidWktHash;
+
+		if (other.spatialReference)
+		{
+			clonedSrs.reset(other.spatialReference->Clone());
+		}
+		else
+		{
+			clonedSrs.reset(CreateOgrSpatialReference());
+		}
 	}
-	else
+
 	{
-		newSrs.reset(CreateOgrSpatialReference());
+		std::lock_guard<std::recursive_mutex> lock(mutex);
+
+		spatialReference.swap(clonedSrs);
+		if (spatialReference == nullptr)
+		{
+			useTraditionalGisAxisOrder = true;
+			InvalidateCachesNoLock();
+			return *this;
+		}
+		useTraditionalGisAxisOrder = otherUseTraditionalGisAxisOrder;
+
+		if (spatialReference)
+		{
+			ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
+		}
+
+		hasCachedDefaultEpsgCode = otherHasCachedDefaultEpsgCode;
+		cachedDefaultEpsgCode = otherCachedDefaultEpsgCode;
+		cachedUidKind = otherCachedUidKind;
+		cachedUidWktHash = otherCachedUidWktHash;
 	}
 
-	spatialReference.swap(newSrs);
-	useTraditionalGisAxisOrder = other.useTraditionalGisAxisOrder;
-
-	if (spatialReference)
-	{
-		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
-	}
-
-	InvalidateCachesNoLock();
 	return *this;
 }
 
@@ -818,21 +846,39 @@ GeoCrs& GeoCrs::operator=(GeoCrs&& other) noexcept
 		return *this;
 	}
 
-	std::lock_guard<std::recursive_mutex> lock(mutex);
-	std::lock_guard<std::recursive_mutex> otherLock(other.mutex);
+	// 使用 std::lock 同时获取两把锁，规避死锁。
+	std::unique_lock<std::recursive_mutex> lock(mutex, std::defer_lock);
+	std::unique_lock<std::recursive_mutex> otherLock(other.mutex, std::defer_lock);
+	std::lock(lock, otherLock);
 
 	spatialReference = std::move(other.spatialReference);
 	useTraditionalGisAxisOrder = other.useTraditionalGisAxisOrder;
+
+	hasCachedDefaultEpsgCode = other.hasCachedDefaultEpsgCode;
+	cachedDefaultEpsgCode = other.cachedDefaultEpsgCode;
+	cachedUidKind = other.cachedUidKind;
+	cachedUidWktHash = other.cachedUidWktHash;
 
 	if (spatialReference)
 	{
 		ApplyAxisOrderStrategy(*spatialReference, useTraditionalGisAxisOrder);
 	}
+	else
+	{
+		useTraditionalGisAxisOrder = true;
+		hasCachedDefaultEpsgCode = false;
+		cachedDefaultEpsgCode = 0;
+		cachedUidKind = -2;
+		cachedUidWktHash = 0;
+	}
 
-	InvalidateCachesNoLock();
-
-	// 保持被移动对象可用
+	// 保持被移动对象可用（置为空 CRS）
 	other.useTraditionalGisAxisOrder = true;
+	other.hasCachedDefaultEpsgCode = false;
+	other.cachedDefaultEpsgCode = 0;
+	other.cachedUidKind = -2;
+	other.cachedUidWktHash = 0;
+
 	if (other.spatialReference == nullptr)
 	{
 		other.spatialReference.reset(CreateOgrSpatialReference());
@@ -841,7 +887,6 @@ GeoCrs& GeoCrs::operator=(GeoCrs&& other) noexcept
 			ApplyAxisOrderStrategy(*other.spatialReference, other.useTraditionalGisAxisOrder);
 		}
 	}
-	other.InvalidateCachesNoLock();
 
 	return *this;
 }
@@ -963,25 +1008,14 @@ bool GeoCrs::SetFromUserInput(const std::string& definitionUtf8, bool allowNetwo
 		return false;
 	}
 
-	if (allowNetworkAccess)
-	{
-		CPLSetConfigOption("OSR_ENABLE_NETWORK", "YES");
-	}
-	else
-	{
-		CPLSetConfigOption("OSR_ENABLE_NETWORK", "NO");
-	}
+	// GDAL 3.x 起，为了安全性，SetFromUserInput() 默认会带有访问限制（不允许网络/文件读取）。
+	// 若确需放开，需要使用带 options 的重载，显式传入 ALLOW_NETWORK_ACCESS / ALLOW_FILE_ACCESS。
+	// 参考 GDAL/OGR 文档：OGRSpatialReference::SetFromUserInput(pszDefinition, papszOptions)。
+	const char* const networkOption = allowNetworkAccess ? "ALLOW_NETWORK_ACCESS=YES" : "ALLOW_NETWORK_ACCESS=NO";
+	const char* const fileOption = allowFileAccess ? "ALLOW_FILE_ACCESS=YES" : "ALLOW_FILE_ACCESS=NO";
+	const char* const options[] = { networkOption, fileOption, nullptr };
 
-	if (allowFileAccess)
-	{
-		CPLSetConfigOption("OSR_ENABLE_FILE_ACCESS", "YES");
-	}
-	else
-	{
-		CPLSetConfigOption("OSR_ENABLE_FILE_ACCESS", "NO");
-	}
-
-	const OGRErr err = srs->SetFromUserInput(trimmed.c_str());
+	const OGRErr err = srs->SetFromUserInput(trimmed.c_str(), options);
 	if (err != OGRERR_NONE)
 	{
 		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】SetFromUserInput失败: err=") + std::to_string(static_cast<int>(err)) +
@@ -1049,7 +1083,7 @@ std::string GeoCrs::GetUidUtf8() const
 		return "WKT2_2018_HASH:" + ToHex64(cachedUidWktHash);
 	}
 
-	const int epsgCode = TryGetEpsgCodeNoLock(true, false, 90);
+	const int epsgCode = TryGetEpsgCodeNoLock(false, false, 0);
 	if (epsgCode > 0)
 	{
 		cachedUidKind = epsgCode;
