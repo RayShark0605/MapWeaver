@@ -1292,7 +1292,6 @@ int GeoCrs::TryGetEpsgCode(bool tryAutoIdentify, bool tryFindBestMatch, int minM
 	return TryGetEpsgCodeNoLock(tryAutoIdentify, tryFindBestMatch, minMatchConfidence);
 }
 
-
 std::string GeoCrs::ToEpsgStringUtf8() const
 {
 	const int epsgCode = TryGetEpsgCode(true);
@@ -1303,7 +1302,6 @@ std::string GeoCrs::ToEpsgStringUtf8() const
 	}
 	return "EPSG:" + std::to_string(epsgCode);
 }
-
 
 std::string GeoCrs::ToOgcUrnStringUtf8() const
 {
@@ -1342,7 +1340,6 @@ GeoCrs::UnitsInfo GeoCrs::GetLinearUnits() const
 	return info;
 }
 
-
 GeoCrs::UnitsInfo GeoCrs::GetAngularUnits() const
 {
 	std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -1360,13 +1357,11 @@ GeoCrs::UnitsInfo GeoCrs::GetAngularUnits() const
 	return info;
 }
 
-
 std::vector<GeoCrs::LonLatAreaSegment> GeoCrs::GetValidAreaLonLatSegments() const
 {
 	std::lock_guard<std::recursive_mutex> lock(mutex);
 	return GetValidAreaLonLatSegmentsNoLock();
 }
-
 
 GeoBoundingBox GeoCrs::GetValidArea() const
 {
@@ -1374,13 +1369,11 @@ GeoBoundingBox GeoCrs::GetValidArea() const
 	return GetValidAreaNoLock();
 }
 
-
 GeoBoundingBox GeoCrs::GetValidAreaLonLat() const
 {
 	std::lock_guard<std::recursive_mutex> lock(mutex);
 	return GetValidAreaLonLatNoLock();
 }
-
 
 const OGRSpatialReference* GeoCrs::GetConst() const
 {
@@ -1418,7 +1411,6 @@ OGRSpatialReference& GeoCrs::GetRef()
 	return *srs;
 }
 
-
 OGRSpatialReference* GeoCrs::Get()
 {
 	std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -1433,4 +1425,3 @@ OGRSpatialReference* GeoCrs::Get()
 	InvalidateCachesNoLock();
 	return srs;
 }
-

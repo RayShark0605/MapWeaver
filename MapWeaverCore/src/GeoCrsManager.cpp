@@ -547,6 +547,69 @@ namespace
             g_validAreaCache.clear();
         }
     }
+
+    int ParseEpsgCodeFromStringUtf8(const std::string& epsgCodeUtf8)
+    {
+        const std::string trimmed = GB_Utf8Trim(epsgCodeUtf8);
+        if (trimmed.empty())
+        {
+            return 0;
+        }
+
+        // 允许："EPSG:4326" / "epsg:4326" / "4326"。
+        std::string codePart = trimmed;
+        if (trimmed.size() >= 5)
+        {
+            const char e0 = static_cast<char>(std::tolower(static_cast<unsigned char>(trimmed[0])));
+            const char e1 = static_cast<char>(std::tolower(static_cast<unsigned char>(trimmed[1])));
+            const char e2 = static_cast<char>(std::tolower(static_cast<unsigned char>(trimmed[2])));
+            const char e3 = static_cast<char>(std::tolower(static_cast<unsigned char>(trimmed[3])));
+            if (e0 == 'e' && e1 == 'p' && e2 == 's' && e3 == 'g')
+            {
+                const size_t colonPos = trimmed.find(':');
+                if (colonPos != std::string::npos)
+                {
+                    codePart = GB_Utf8Trim(trimmed.substr(colonPos + 1));
+                }
+                else
+                {
+                    return 0;
+                }
+            }
+        }
+
+        if (codePart.empty())
+        {
+            return 0;
+        }
+
+        // 纯数字检查
+        for (const char ch : codePart)
+        {
+            if (ch < '0' || ch > '9')
+            {
+                return 0;
+            }
+        }
+
+        errno = 0;
+        char* endPtr = nullptr;
+        const long long value = std::strtoll(codePart.c_str(), &endPtr, 10);
+        if (endPtr == nullptr || endPtr == codePart.c_str() || *endPtr != '\0')
+        {
+            return 0;
+        }
+        if (errno == ERANGE)
+        {
+            return 0;
+        }
+        if (value <= 0 || value > static_cast<long long>(std::numeric_limits<int>::max()))
+        {
+            return 0;
+        }
+
+        return static_cast<int>(value);
+    }
 } // namespace
 
 bool GeoCrsManager::IsInitialized()
@@ -659,6 +722,44 @@ std::shared_ptr<const GeoCrs> GeoCrsManager::GetWgs84()
 std::shared_ptr<const GeoCrs> GeoCrsManager::GetWebMercator()
 {
     return GetFromEpsgCached(3857);
+}
+
+std::string GeoCrsManager::EpsgCodeToWktUtf8(const std::string& epsgCodeUtf8)
+{
+    EnsureInitializedInternal();
+
+    const int epsgCode = ParseEpsgCodeFromStringUtf8(epsgCodeUtf8);
+    if (epsgCode <= 0)
+    {
+        return "";
+    }
+
+    const std::shared_ptr<const GeoCrs> crs = GetFromEpsgCached(epsgCode);
+    if (!crs || !crs->IsValid())
+    {
+        return "";
+    }
+
+    return crs->ExportToWktUtf8(GeoCrs::WktFormat::Wkt2_2018, false);
+}
+
+std::string GeoCrsManager::WktToEpsgCodeUtf8(const std::string& wktUtf8)
+{
+    EnsureInitializedInternal();
+
+    const std::string trimmed = GB_Utf8Trim(wktUtf8);
+    if (trimmed.empty())
+    {
+        return "";
+    }
+
+    const std::shared_ptr<const GeoCrs> crs = GetFromWktCached(trimmed);
+    if (!crs || !crs->IsValid())
+    {
+        return "";
+    }
+
+    return crs->ToEpsgStringUtf8();
 }
 
 std::shared_ptr<const GeoCrs> GeoCrsManager::GetFromEpsgCached(int epsgCode)

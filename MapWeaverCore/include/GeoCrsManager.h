@@ -40,9 +40,20 @@ public:
 	// 清空内部所有缓存（不改变 PROJ 搜索路径）。
 	static void ClearCaches();
 
-	// 常见 EPSG：WGS84 / WebMercator / CGCS2000。
+	// 常见 EPSG：WGS84 / WebMercator。
 	static std::shared_ptr<const GeoCrs> GetWgs84();       // EPSG:4326
 	static std::shared_ptr<const GeoCrs> GetWebMercator(); // EPSG:3857
+
+	// 输入 UTF-8 编码的 EPSG Code（例如 "EPSG:4326"）返回对应的 UTF-8 编码 WKT（默认 WKT2_2018）。
+	// 若输入非法或无法解析/导出，则返回空串。
+	static std::string EpsgCodeToWktUtf8(const std::string& epsgCodeUtf8);
+
+	// 输入 UTF-8 编码的 WKT，尝试返回对应的 UTF-8 编码 EPSG Code（例如 "EPSG:4326"）。
+	// 说明：
+	//  - 若 WKT 根节点已包含 EPSG 权威码，则直接返回；
+	//  - 否则会尝试使用 GDAL 的 AutoIdentifyEPSG() 做安全的推断（依赖 proj.db）。
+	// 若输入非法或无法推断，则返回空串。
+	static std::string WktToEpsgCodeUtf8(const std::string& wktUtf8);
 
 	// 按 EPSG code 获取（带缓存）。
 	static std::shared_ptr<const GeoCrs> GetFromEpsgCached(int epsgCode);

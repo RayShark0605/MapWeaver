@@ -37,18 +37,16 @@ public:
 
 	bool Deserialize(const std::string& data);
 	bool Deserialize(const GB_ByteBuffer& data);
+
+	// 将当前 rect 限制到当前 wktUtf8 对应坐标系的“自身有效范围”内
+	bool ClampRectToCrsValidArea();
+
+	// 返回 ClampRectToCrsValidArea() 的结果副本（当前对象不变）。
+	GeoBoundingBox ClampedRectToCrsValidArea() const;
 };
 
 #ifdef _MSC_VER
 #  pragma warning(pop)
 #endif
-
-
-
-
-
-
-
-
 
 #endif

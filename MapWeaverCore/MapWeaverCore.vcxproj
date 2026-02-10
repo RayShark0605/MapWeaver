@@ -22,6 +22,7 @@
     <ClInclude Include="include\GeoBoundingBox.h" />
     <ClInclude Include="include\GeoCrs.h" />
     <ClInclude Include="include\GeoCrsManager.h" />
+    <ClInclude Include="include\GeoCrsTransform.h" />
     <ClInclude Include="include\MapLayer.h" />
     <ClInclude Include="include\MapWeaverBase.h" />
     <ClInclude Include="include\MapWeaverPort.h" />
@@ -30,6 +31,7 @@
     <ClCompile Include="src\GeoBoundingBox.cpp" />
     <ClCompile Include="src\GeoCrs.cpp" />
     <ClCompile Include="src\GeoCrsManager.cpp" />
+    <ClCompile Include="src\GeoCrsTransform.cpp" />
     <ClCompile Include="src\MapWeaverBase.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
@@ -139,6 +141,8 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>
       </PrecompiledHeaderFile>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -158,6 +162,8 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>
       </PrecompiledHeaderFile>
+      <LanguageStandard>stdcpp14</LanguageStandard>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
