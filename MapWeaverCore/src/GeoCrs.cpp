@@ -390,6 +390,9 @@ int GeoCrs::TryGetEpsgCodeNoLock(bool tryAutoIdentify, bool tryFindBestMatch, in
 		return 0;
 	}
 
+	// FindBestMatch 的最小匹配置信度建议在 [0, 100] 区间内；这里做一次夹取，避免异常入参。
+	minMatchConfidence = std::max(0, std::min(100, minMatchConfidence));
+
 	const bool isDefaultQuery = (tryAutoIdentify && !tryFindBestMatch && minMatchConfidence == 90);
 	if (isDefaultQuery && hasCachedDefaultEpsgCode)
 	{
@@ -412,16 +415,19 @@ int GeoCrs::TryGetEpsgCodeNoLock(bool tryAutoIdentify, bool tryFindBestMatch, in
 		std::unique_ptr<OGRSpatialReference, GeoCrsOgrSrsDeleter> cloned(spatialReference->Clone());
 		if (cloned)
 		{
-			cloned->AutoIdentifyEPSG();
-			epsgCode = ExtractEpsgCodeFromSrs(*cloned);
-			if (epsgCode > 0)
+			const OGRErr err = cloned->AutoIdentifyEPSG();
+			if (err == OGRERR_NONE)
 			{
-				if (isDefaultQuery)
+				epsgCode = ExtractEpsgCodeFromSrs(*cloned);
+				if (epsgCode > 0)
 				{
-					cachedDefaultEpsgCode = epsgCode;
-					hasCachedDefaultEpsgCode = true;
+					if (isDefaultQuery)
+					{
+						cachedDefaultEpsgCode = epsgCode;
+						hasCachedDefaultEpsgCode = true;
+					}
+					return epsgCode;
 				}
-				return epsgCode;
 			}
 		}
 	}

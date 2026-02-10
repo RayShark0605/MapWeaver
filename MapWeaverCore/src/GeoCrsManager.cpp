@@ -143,10 +143,12 @@ namespace
             return true;
         }
 
-        // Windows: 盘符 "C:" / "D:" ...
-        if (pathUtf8.size() >= 2 &&
+        // Windows: 盘符 "C:/" / "D:/" ...
+        // 注意："C:foo" 属于“驱动器相对路径”（相对于该驱动器的当前工作目录），这里不视为 rooted。
+        if (pathUtf8.size() >= 3 &&
             std::isalpha(static_cast<unsigned char>(pathUtf8[0])) &&
-            pathUtf8[1] == ':')
+            pathUtf8[1] == ':' &&
+            (pathUtf8[2] == '/' || pathUtf8[2] == '\\'))
         {
             return true;
         }
@@ -329,7 +331,17 @@ namespace
                 continue;
             }
 
-            if (pattern.back() != L'\\' && pattern.back() != L'/')
+            // Win32 枚举 API 对 '/' 通常也能工作，但为避免边缘场景（以及与 reparse point 有关的路径解析差异），
+            // 这里统一改为 "\\"。
+            for (wchar_t& ch : pattern)
+            {
+                if (ch == L'/')
+                {
+                    ch = L'\\';
+                }
+            }
+
+            if (pattern.back() != L'\\')
             {
                 pattern.push_back(L'\\');
             }
