@@ -1,7 +1,5 @@
 ﻿#include "GeoCrsManager.h"
 
-#include "GeoCrs.h"
-
 #include "GB_FileSystem.h"
 #include "GB_Logger.h"
 #include "GB_ReadWriteLock.h"

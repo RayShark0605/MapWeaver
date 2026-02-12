@@ -2,6 +2,7 @@
 #define MAP_WEAVER_GEO_CRS_MANAGER_H
 
 #include "MapWeaverPort.h"
+#include "GeoCrs.h"
 
 #include <cstddef>
 #include <memory>
