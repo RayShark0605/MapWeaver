@@ -32,6 +32,7 @@
     <ClCompile Include="src\GeoCrs.cpp" />
     <ClCompile Include="src\GeoCrsManager.cpp" />
     <ClCompile Include="src\GeoCrsTransform.cpp" />
+    <ClCompile Include="src\MapLayer.cpp" />
     <ClCompile Include="src\MapWeaverBase.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
