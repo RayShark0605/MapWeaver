@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include "GeoBoundingBox.h"
 #include "GB_DateTime.h"
 #include "GB_Interval.h"
@@ -273,10 +274,145 @@ struct WmtsTileMatrix
 	double tres = 0;
 
 	GB_Rectangle TileRect(int tileCol, int tileRow) const;
+
 	bool Intersects(const GB_Rectangle& rect, const WmtsTileMatrixLimits* tileMatrixLimits, GB_IntInterval& colIndexInterval, GB_IntInterval& rowIndexInterval) const;
 };
 
+struct WmtsTileMatrixSet
+{
+	std::string identifierUtf8 = "";
+	std::string titleUtf8 = "";
+	std::string abstractUtf8 = "";
+	std::vector<std::string> keywordsUtf8;
+	std::string crsUtf8 = "";
+	std::string wkScaleSetUtf8 = "";
+	std::unordered_map<double, WmtsTileMatrix> tileMatrices;
 
+	const WmtsTileMatrix* FindNearestResolution(double targetTileResolution) const;
+
+	const WmtsTileMatrix* FindOtherResolution(double targetTileResolution, int offset) const;
+};
+
+enum class MapTileMode
+{
+	WMTS,
+	WMSC,
+	XYZ
+};
+
+struct WmtsTileMatrixLimits
+{
+	std::string tileMatrixIdentifierUtf8 = "";
+	GB_IntInterval rowIndexInterval;
+	GB_IntInterval colIndexInterval;
+};
+
+struct WmtsTileMatrixSetLink
+{
+	std::string tileMatrixSetIdentifierUtf8 = "";
+	std::unordered_map<std::string, WmtsTileMatrixLimits> limits;
+};
+
+struct WmtsLegendUrl
+{
+	std::string formatUtf8 = "";
+	double minScale = 0, maxScale = 0;
+	std::string hrefUtf8 = "";
+	int width = 0, height = 0;
+};
+
+struct WmtsStyle
+{
+	std::string identifierUtf8 = "";
+	std::string titleUtf8 = "", abstractUtf8 = "";
+	std::vector<std::string> keywordsUtf8;
+	bool isDefault = false;
+	std::vector<WmtsLegendUrl> legendUrls;
+};
+
+struct WmtsDimension
+{
+	std::string identifierUtf8 = "";
+	std::string titleUtf8 = "";
+	std::string abstractUtf8 = "";
+	std::vector<std::string> keywordsUtf8;
+	std::string unitOfMeasureUtf8 = "";
+	std::string defaultValueUtf8 = "";
+	bool current = false;
+	std::vector<std::string> values;
+};
+
+struct WmtsTileLayer
+{
+	MapTileMode tileMode;
+	std::string identifierUtf8 = "";
+	std::string titleUtf8 = "";
+	std::string abstractUtf8 = "";
+	std::vector<std::string> keywordsUtf8;
+	std::vector<GeoBoundingBox> boundingBoxes;
+	std::vector<std::string> formats;
+	std::vector<std::string> infoFormats;
+	std::string defaultStyleUtf8 = "";
+	int dpi = -1;
+	std::unordered_map<std::string, WmtsDimension> dimensions;
+	std::unordered_map<std::string, WmtsStyle> styles;
+	std::unordered_map<std::string, WmtsTileMatrixSetLink> setLinks;
+	std::unordered_map<std::string, std::string> getTileUrls;
+	std::unordered_map<std::string, std::string> getFeatureInfoUrls;
+	std::string timeDimensionIdentifierUtf8 = "";
+	std::vector<GB_DateTimeInterval> allTimeRanges;
+	GB_DateTimeInterval temporalExtent;
+	GB_TimeDuration temporalResolution;
+
+	enum class WmtsTimeFormat
+	{
+		YYYYMMDD,
+		YYYY_MM_DD,
+		YYYY,
+		YYYYMMDDYYYYMMDDPxx,
+		YYYYMMDDTHHMMSSZ
+	};
+	WmtsTimeFormat timeFormat = WmtsTimeFormat::YYYYMMDD;
+
+	enum class TemporalCapabilityFlag
+	{
+		RequestedTimesMustExactlyMatchAllAvailableTemporalRanges
+	};
+	TemporalCapabilityFlag temporalCapabilityFlags;
+
+	std::string defaultTimeDimensionValueUtf8 = "";
+};
+
+struct WmsCapabilityProperty
+{
+	WmsRequestProperty request;
+	WmsExceptionProperty exception;
+	std::vector<WmsLayerProperty> layers;
+	std::vector<WmtsTileLayer> tileLayers;
+	std::unordered_map<std::string, WmtsTileMatrixSet> tileMatrixSets;
+};
+
+struct WmsCapabilitiesProperty
+{
+	WmsServiceProperty service;
+	WmsCapabilityProperty capability;
+	std::string versionUtf8 = "";
+};
+
+struct WmsSupportedFormat
+{
+	std::string formatUtf8 = "";
+	std::string labelUtf8 = "";
+};
+
+enum class WmsDpiMode
+{
+	DpiNone = 0,
+	DpiQGIS = 1,
+	DpiUMN = 2,
+	DpiGeoServer = 4,
+	DpiAll = DpiQGIS | DpiUMN | DpiGeoServer,
+};
 
 
 
