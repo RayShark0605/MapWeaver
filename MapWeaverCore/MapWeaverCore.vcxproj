@@ -25,6 +25,7 @@
     <ClInclude Include="include\GeoCrsTransform.h" />
     <ClInclude Include="include\MapLayer.h" />
     <ClInclude Include="include\MapWeaverBase.h" />
+    <ClInclude Include="include\MapWeaverCore.h" />
     <ClInclude Include="include\MapWeaverPort.h" />
   </ItemGroup>
   <ItemGroup>
@@ -34,6 +35,7 @@
     <ClCompile Include="src\GeoCrsTransform.cpp" />
     <ClCompile Include="src\MapLayer.cpp" />
     <ClCompile Include="src\MapWeaverBase.cpp" />
+    <ClCompile Include="src\MapWeaverCore.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>

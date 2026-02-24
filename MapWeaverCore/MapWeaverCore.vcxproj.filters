@@ -36,6 +36,9 @@
     <ClInclude Include="include\GeoCrsTransform.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\MapWeaverCore.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\GeoBoundingBox.cpp">
@@ -54,6 +57,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="src\MapLayer.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="src\MapWeaverCore.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
