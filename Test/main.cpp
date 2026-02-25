@@ -1,6 +1,7 @@
 ﻿#include "../MapWeaverCore/include/GeoCrsManager.h"
 #include "../MapWeaverCore/include/GeoBoundingBox.h"
 #include "../MapWeaverCore/include/GeoCrsTransform.h"
+#include "../MapWeaverCore/include/MapWeaverCore.h"
 #include "GB_Logger.h"
 #include "GB_SmbAccessor.h"
 #include "GB_Interval.h"
@@ -11,18 +12,9 @@ int main(int argc, char* argv[])
 {
 	GB_SetConsoleEncodingToUtf8();
 
-	GB_Interval<GB_Date> timeInterval;
-	timeInterval.lower = GB_Date::Today();
+	std::string capabilitiesXmlUtf8 = "";
+	bool ok = DownloadWmsCapabilities(GB_STR("https://gsi-cyberjapan.github.io/experimental_wmts/gsitiles_wmts_light.xml"), capabilitiesXmlUtf8);
 
-	timeInterval.upper = timeInterval.lower.AddDays(1);
-
-
-
-
-
-
-
-	
 
 	return 0;
 }

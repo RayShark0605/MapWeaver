@@ -5,6 +5,8 @@
 #include "GB_Network.h"
 #include <string>
 
+MAPWEAVERCORE_PORT bool IsUrlForWMTS(const std::string& urlUtf8);
+
 MAPWEAVERCORE_PORT bool DownloadWmsCapabilities(const std::string& urlUtf8, std::string& outCapabilitiesXmlUtf8, const GB_NetworkRequestOptions& options = GB_NetworkRequestOptions());
 
 
