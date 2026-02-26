@@ -12,16 +12,17 @@ int main(int argc, char* argv[])
 	GB_SetLogToConsole(true);
 
 	std::string capabilitiesXmlUtf8 = "";
-	if (!DownloadWmsCapabilities(GB_STR("https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/1.0.0/WMTSCapabilities.xml"), capabilitiesXmlUtf8)
+	if (!DownloadWmsCapabilities(GB_STR("https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities"), capabilitiesXmlUtf8)
 		|| capabilitiesXmlUtf8.empty())
 	{
 		return 1;
 	}
 
-	if (!GB_WriteUtf8ToFile(GB_GetExeDirectory() + GB_STR("capabilities.xml"), capabilitiesXmlUtf8, false))
-	{
-		return 1;
-	}
+	WmsCapabilitiesProperty capabilities;
+	ParseWmsCapabilities(capabilitiesXmlUtf8, capabilities);
+
+
+
 	return 0;
 }
 
