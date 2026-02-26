@@ -297,6 +297,7 @@ namespace
 					}
 					catch (const std::exception& e)
 					{
+						GBLOG_WARNING(GB_Utf8Format("Failed to parse LayerLimit value: '%s'. Error message: %s", GetXmlNodeValue(curNode).c_str(), e.what()));
 						serviceProperty.layerLimit = 0;
 					}
 				}
@@ -308,6 +309,7 @@ namespace
 					}
 					catch (const std::exception& e)
 					{
+						GBLOG_WARNING(GB_Utf8Format("Failed to parse MaxWidth value: '%s'. Error message: %s", GetXmlNodeValue(curNode).c_str(), e.what()));
 						serviceProperty.maxWidth = 0;
 					}
 				}
@@ -319,6 +321,7 @@ namespace
 					}
 					catch (const std::exception& e)
 					{
+						GBLOG_WARNING(GB_Utf8Format("Failed to parse MaxHeight value: '%s'. Error message: %s", GetXmlNodeValue(curNode).c_str(), e.what()));
 						serviceProperty.maxHeight = 0;
 					}
 				}
