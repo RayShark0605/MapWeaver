@@ -2,6 +2,8 @@
 #include "GB_Utf8String.h"
 #include "GB_Network.h"
 #include "GB_Logger.h"
+#include "GeoCrsManager.h"
+#include "GeoCrsTransform.h"
 
 #include "cpl_minixml.h"
 #include "cpl_error.h"
@@ -162,12 +164,6 @@ namespace
 				return false;
 			}
 
-			if (!CPLIsUTF8(capabilitiesXmlUtf8.c_str(), static_cast<int>(capabilitiesXmlUtf8.size())))
-			{
-				GBLOG_WARNING("Capabilities XML does not appear to be valid UTF-8.");
-				return false;
-			}
-
 			if (!ParseDom(capabilitiesXmlUtf8, capabilities))
 			{
 				return false;
@@ -231,6 +227,12 @@ namespace
 					GB_Utf8Equals(nodeName, GB_STR("ows:ServiceIdentification"), false))
 				{
 					ParseService(curNode, capabilitiesProperty.service);
+				}
+				else if (GB_Utf8Equals(nodeName, GB_STR("Capability"), false) || GB_Utf8Equals(nodeName, GB_STR("ows:OperationsMetadata"), false))
+				{
+					ParseCapability(curNode, capabilitiesProperty.capability);
+
+
 				}
 
 
@@ -325,6 +327,44 @@ namespace
 						serviceProperty.maxHeight = 0;
 					}
 				}
+			}
+		}
+
+		void ParseCapability(const CPLXMLNode* rootNode, WmsCapabilityProperty& capabilityProperty)
+		{
+			if (!rootNode)
+			{
+				return;
+			}
+
+			for (CPLXMLNode* curNode = rootNode->psChild; curNode != nullptr; curNode = curNode->psNext)
+			{
+				if (curNode->eType != CXT_Element)
+				{
+					continue;
+				}
+
+				std::string nodeName = GetXmlNodeTagName(curNode);
+				if (GB_Utf8StartsWith(nodeName, GB_STR("wms:"), false))
+				{
+					nodeName = GB_Utf8Substr(nodeName, 4);
+				}
+
+				if (GB_Utf8Equals(nodeName, GB_STR("Request"), false))
+				{
+					ParseRequest(curNode, capabilityProperty.request);
+				}
+				else if (GB_Utf8Equals(nodeName, GB_STR("Layer"), false))
+				{
+					WmsLayerProperty layer;
+					ParseLayer(curNode, layer);
+					capabilityProperty.layers.push_back(std::move(layer));
+				}
+
+
+
+
+
 			}
 		}
 
@@ -558,6 +598,327 @@ namespace
 					contactAddressProperty.countryUtf8 = GetXmlNodeValue(curNode);
 				}
 			}
+		}
+
+		void ParseRequest(const CPLXMLNode* rootNode, WmsRequestProperty& requestProperty)
+		{
+			if (!rootNode)
+			{
+				return;
+			}
+
+			for (CPLXMLNode* curNode = rootNode->psChild; curNode != nullptr; curNode = curNode->psNext)
+			{
+				if (curNode->eType != CXT_Element)
+				{
+					continue;
+				}
+
+				std::string operation = GetXmlNodeTagName(curNode);
+				if (GB_Utf8Equals(operation, GB_STR("Operation"), false))
+				{
+					operation = GetXmlNodeAttribute(curNode, GB_STR("name"));
+				}
+
+				if (GB_Utf8StartsWith(operation, GB_STR("GetMap"), false))
+				{
+					ParseOperationType(curNode, requestProperty.getMap);
+				}
+				else if (GB_Utf8StartsWith(operation, GB_STR("GetFeatureInfo"), false))
+				{
+					ParseOperationType(curNode, requestProperty.getFeatureInfo);
+				}
+				else if (GB_Utf8StartsWith(operation, GB_STR("GetLegendGraphic"), false) || GB_Utf8StartsWith(operation, GB_STR("sld:GetLegendGraphic"), false))
+				{
+					ParseOperationType(curNode, requestProperty.getLegendGraphic);
+				}
+			}
+		}
+
+		void ParseOperationType(const CPLXMLNode* rootNode, WmsOperationType& operationType)
+		{
+			if (!rootNode)
+			{
+				return;
+			}
+
+			for (CPLXMLNode* curNode = rootNode->psChild; curNode != nullptr; curNode = curNode->psNext)
+			{
+				if (curNode->eType != CXT_Element)
+				{
+					continue;
+				}
+
+				std::string nodeName = GetXmlNodeTagName(curNode);
+				if (GB_Utf8StartsWith(nodeName, GB_STR("wms:"), false))
+				{
+					nodeName = GB_Utf8Substr(nodeName, 4);
+				}
+
+				if (GB_Utf8Equals(nodeName, GB_STR("Format"), false))
+				{
+					operationType.formatsUtf8.push_back(GetXmlNodeValue(curNode));
+				}
+				else if (GB_Utf8Equals(nodeName, GB_STR("DCPType"), false))
+				{
+					WmsDcpTypeProperty dcpType;
+					ParseDcpType(curNode, dcpType);
+					operationType.dcpTypes.push_back(dcpType);
+				}
+			}
+		}
+
+		void ParseDcpType(const CPLXMLNode* rootNode, WmsDcpTypeProperty& dcpTypeProperty)
+		{
+			if (!rootNode)
+			{
+				return;
+			}
+
+			for (CPLXMLNode* curNode = rootNode->psChild; curNode != nullptr; curNode = curNode->psNext)
+			{
+				if (curNode->eType != CXT_Element)
+				{
+					continue;
+				}
+
+				const std::string nodeName = GetXmlNodeTagName(curNode);
+				if (GB_Utf8Equals(nodeName, GB_STR("HTTP"), false))
+				{
+					ParseHttp(curNode, dcpTypeProperty.http);
+				}
+			}
+		}
+
+		void ParseHttp(const CPLXMLNode* rootNode, WmsHttpProperty& httpProperty)
+		{
+			if (!rootNode)
+			{
+				return;
+			}
+
+			for (CPLXMLNode* curNode = rootNode->psChild; curNode != nullptr; curNode = curNode->psNext)
+			{
+				if (curNode->eType != CXT_Element)
+				{
+					continue;
+				}
+
+				std::string nodeName = GetXmlNodeTagName(curNode);
+				if (GB_Utf8StartsWith(nodeName, GB_STR("wms:"), false))
+				{
+					nodeName = GB_Utf8Substr(nodeName, 4);
+				}
+
+				if (GB_Utf8Equals(nodeName, GB_STR("Get"), false))
+				{
+					ParseGet(curNode, httpProperty.get);
+				}
+				else if (GB_Utf8Equals(nodeName, GB_STR("Post"), false))
+				{
+					ParsePost(curNode, httpProperty.post);
+				}
+			}
+		}
+
+		void ParseGet(const CPLXMLNode* rootNode, WmsGetProperty& getProperty)
+		{
+			if (!rootNode)
+			{
+				return;
+			}
+
+			for (CPLXMLNode* curNode = rootNode->psChild; curNode != nullptr; curNode = curNode->psNext)
+			{
+				if (curNode->eType != CXT_Element)
+				{
+					continue;
+				}
+
+				std::string nodeName = GetXmlNodeTagName(curNode);
+				if (GB_Utf8StartsWith(nodeName, GB_STR("wms:"), false))
+				{
+					nodeName = GB_Utf8Substr(nodeName, 4);
+				}
+
+				if (GB_Utf8Equals(nodeName, GB_STR("OnlineResource"), false))
+				{
+					ParseOnlineResource(curNode, getProperty.onlineResource);
+				}
+			}
+		}
+
+		void ParsePost(const CPLXMLNode* rootNode, WmsPostProperty& postProperty)
+		{
+			if (!rootNode)
+			{
+				return;
+			}
+			for (CPLXMLNode* curNode = rootNode->psChild; curNode != nullptr; curNode = curNode->psNext)
+			{
+				if (curNode->eType != CXT_Element)
+				{
+					continue;
+				}
+
+				std::string nodeName = GetXmlNodeTagName(curNode);
+				if (GB_Utf8StartsWith(nodeName, GB_STR("wms:"), false))
+				{
+					nodeName = GB_Utf8Substr(nodeName, 4);
+				}
+
+				if (GB_Utf8Equals(nodeName, GB_STR("OnlineResource"), false))
+				{
+					ParseOnlineResource(curNode, postProperty.onlineResource);
+				}
+			}
+		}
+
+		void ParseLayer(const CPLXMLNode* rootNode, WmsLayerProperty& layerProperty, WmsLayerProperty* parentProperty = nullptr)
+		{
+			if (!rootNode)
+			{
+				return;
+			}
+
+			numLayers++;
+			layerProperty.orderId = numLayers;
+
+			const std::string queryableAttribute = GetXmlNodeAttribute(rootNode, GB_STR("queryable"));
+			layerProperty.queryable = GB_Utf8Equals(queryableAttribute, GB_STR("1"), false) || GB_Utf8Equals(queryableAttribute, GB_STR("true"), false);
+
+			layerProperty.cascaded = static_cast<int>(GB_ToUInt(GetXmlNodeAttribute(rootNode, GB_STR("cascaded")), 0));
+
+			const std::string opaqueAttribute = GetXmlNodeAttribute(rootNode, GB_STR("opaque"));
+			layerProperty.opaque = GB_Utf8Equals(opaqueAttribute, GB_STR("1"), false) || GB_Utf8Equals(opaqueAttribute, GB_STR("true"), false);
+
+			const std::string noSubsetsAttribute = GetXmlNodeAttribute(rootNode, GB_STR("noSubsets"));
+			layerProperty.noSubsets = GB_Utf8Equals(noSubsetsAttribute, GB_STR("1"), false) || GB_Utf8Equals(noSubsetsAttribute, GB_STR("true"), false);
+
+			layerProperty.fixedWidth = static_cast<int>(GB_ToUInt(GetXmlNodeAttribute(rootNode, GB_STR("fixedWidth")), 0));
+			layerProperty.fixedHeight = static_cast<int>(GB_ToUInt(GetXmlNodeAttribute(rootNode, GB_STR("fixedHeight")), 0));
+
+			for (CPLXMLNode* curNode = rootNode->psChild; curNode != nullptr; curNode = curNode->psNext)
+			{
+				if (curNode->eType != CXT_Element)
+				{
+					continue;
+				}
+
+				std::string nodeName = GetXmlNodeTagName(curNode);
+				if (GB_Utf8StartsWith(nodeName, GB_STR("wms:"), false))
+				{
+					nodeName = GB_Utf8Substr(nodeName, 4);
+				}
+
+				if (GB_Utf8Equals(nodeName, GB_STR("Layer"), false))
+				{
+					std::vector<WmsStyleProperty> inheritedStyles{ layerProperty.styles };
+
+					CPLXMLNode* nameNode = FindChildElement(curNode, GB_STR("Name"));
+					if (nameNode)
+					{
+						const std::string layerName = GetXmlNodeValue(nameNode);
+						for (WmsStyleProperty& inheritedStyleProperty : inheritedStyles)
+						{
+							for (WmsLegendUrlProperty& legendUrlProperty : inheritedStyleProperty.legendUrls)
+							{
+								std::string legendUrl = legendUrlProperty.onlineResource.xlinkHrefUtf8;
+								if (legendUrl.find('?') != std::string::npos) // 已经包含查询参数
+								{
+									std::string originLayerValue = "";
+									if (GB_UrlOperator::TryGetUrlQueryValue(legendUrl, GB_STR("layer"), originLayerValue))
+									{
+										legendUrl = GB_UrlOperator::SetUrlQueryValue(legendUrl, GB_STR("layer"), layerName);
+									}
+									legendUrlProperty.onlineResource.xlinkHrefUtf8 = legendUrl;
+								}
+							}
+						}
+					}
+
+					WmsLayerProperty subLayerProperty;
+					subLayerProperty.styles = inheritedStyles;
+					subLayerProperty.crsUtf8 = layerProperty.crsUtf8;
+					subLayerProperty.boundingBoxes = layerProperty.boundingBoxes;
+					subLayerProperty.exGeographicBBox = layerProperty.exGeographicBBox;
+					ParseLayer(curNode, subLayerProperty, &layerProperty);
+					layerProperty.subLayers.push_back(std::move(subLayerProperty));
+				}
+				else if (GB_Utf8Equals(nodeName, GB_STR("Name"), false))
+				{
+					layerProperty.nameUtf8 = GetXmlNodeValue(curNode);
+				}
+				else if (GB_Utf8Equals(nodeName, GB_STR("Title"), false))
+				{
+					layerProperty.titleUtf8 = GetXmlNodeValue(curNode);
+				}
+				else if (GB_Utf8Equals(nodeName, GB_STR("Abstract"), false))
+				{
+					layerProperty.abstractUtf8 = GetXmlNodeValue(curNode);
+				}
+				else if (GB_Utf8Equals(nodeName, GB_STR("KeywordList"), false))
+				{
+					ParseKeywordList(curNode, layerProperty.keywordsUtf8);
+				}
+				else if (GB_Utf8Equals(nodeName, GB_STR("SRS"), false) || GB_Utf8Equals(nodeName, GB_STR("CRS"), false))
+				{
+					const std::vector<std::string> crsList = GB_Utf8Split(GetXmlNodeValue(curNode), GB_CHAR(' '));
+					for (const std::string& crs : crsList)
+					{
+						if (std::find(layerProperty.crsUtf8.begin(), layerProperty.crsUtf8.end(), crs) == layerProperty.crsUtf8.end())
+						{
+							// 只添加不重复的 CRS
+							layerProperty.crsUtf8.push_back(crs);
+						}
+					}
+				}
+				else if (GB_Utf8Equals(nodeName, GB_STR("LatLonBoundingBox"), false))
+				{
+					try
+					{
+						const double minX = GB_ToDouble(GB_Utf8Replace(GetXmlNodeAttribute(curNode, GB_STR("minx")), GB_STR(","), GB_STR(".")));
+						const double minY = GB_ToDouble(GB_Utf8Replace(GetXmlNodeAttribute(curNode, GB_STR("miny")), GB_STR(","), GB_STR(".")));
+						const double maxX = GB_ToDouble(GB_Utf8Replace(GetXmlNodeAttribute(curNode, GB_STR("maxx")), GB_STR(","), GB_STR(".")));
+						const double maxY = GB_ToDouble(GB_Utf8Replace(GetXmlNodeAttribute(curNode, GB_STR("maxy")), GB_STR(","), GB_STR(".")));
+						layerProperty.exGeographicBBox.Set(minX, minY, maxX, maxY);
+
+						GeoBoundingBox bbox1("CRS:84", layerProperty.exGeographicBBox);
+						GeoCrsTransform::TransformBoundingBox(bbox1, "EPSG:3857");
+
+						std::string srsValue = "EPSG:3857";
+						//const std::string srsValue = GetXmlNodeAttribute(curNode, GB_STR("SRS"));
+						if (!srsValue.empty() && !GB_Utf8Equals(nodeName, GB_STR("CRS:84"), false) && GeoCrsManager::IsWktValidCached(srsValue))
+						{
+							// 如果 SRS 属性存在且不是 CRS:84
+							const GeoBoundingBox originalBBox(srsValue, layerProperty.exGeographicBBox);
+							GeoBoundingBox targetBBox;
+							if (GeoCrsTransform::TransformBoundingBox(originalBBox, GB_STR("CRS:84"), targetBBox) && targetBBox.IsValid())
+							{
+								layerProperty.exGeographicBBox = targetBBox.rect;
+							}
+							else
+							{
+								GBLOG_WARNING(GB_Utf8Format("Failed to transform LatLonBoundingBox from SRS '%s' to 'CRS:84'. Original SRS: '%s'.", srsValue.c_str(), srsValue.c_str()));
+							}
+						}
+					}
+					catch (const std::exception& e)
+					{
+						GBLOG_WARNING(GB_Utf8Format("Failed to parse LatLonBoundingBox attributes. Error message: %s", e.what()));
+					}
+				}
+			}
+
+
+
+
+
+
+
+
+
+
 		}
 
 	};

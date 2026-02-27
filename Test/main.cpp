@@ -4,6 +4,7 @@
 #include "GB_Interval.h"
 #include "GB_DateTime.h"
 #include "GB_IO.h"
+#include "../MapWeaverCore/include/GeoCrsManager.h"
 #include <iostream>
 
 int main(int argc, char* argv[])
@@ -12,7 +13,7 @@ int main(int argc, char* argv[])
 	GB_SetLogToConsole(true);
 
 	std::string capabilitiesXmlUtf8 = "";
-	if (!DownloadWmsCapabilities(GB_STR("https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities"), capabilitiesXmlUtf8)
+	if (!DownloadWmsCapabilities(GB_STR("https://ovc.catastro.meh.es/Cartografia/WMS/ServidorWMS.aspx?SERVICE=WMS&REQUEST=GETCAPABILITIES"), capabilitiesXmlUtf8)
 		|| capabilitiesXmlUtf8.empty())
 	{
 		return 1;
@@ -20,8 +21,6 @@ int main(int argc, char* argv[])
 
 	WmsCapabilitiesProperty capabilities;
 	ParseWmsCapabilities(capabilitiesXmlUtf8, capabilities);
-
-
 
 	return 0;
 }
