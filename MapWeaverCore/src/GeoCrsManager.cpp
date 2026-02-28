@@ -85,6 +85,19 @@ namespace
     GB_ReadWriteLock g_definitionCacheLock;
     std::unordered_map<DefinitionKey, std::shared_ptr<const GeoCrs>, DefinitionKeyHasher> g_definitionCache;
 
+
+    GB_ReadWriteLock g_definitionValidityCacheLock;
+    std::unordered_map<DefinitionKey, bool, DefinitionKeyHasher> g_definitionValidityCache;
+
+    GB_ReadWriteLock g_epsgAxisOrderReversedCacheLock;
+    std::unordered_map<int, bool> g_epsgAxisOrderReversedCache;
+
+    GB_ReadWriteLock g_wktAxisOrderReversedCacheLock;
+    std::unordered_map<std::string, bool> g_wktAxisOrderReversedCache;
+
+    GB_ReadWriteLock g_definitionAxisOrderReversedCacheLock;
+    std::unordered_map<DefinitionKey, bool, DefinitionKeyHasher> g_definitionAxisOrderReversedCache;
+
     GB_ReadWriteLock g_validAreaCacheLock;
     std::unordered_map<std::string, ValidAreas> g_validAreaCache;
 
@@ -218,6 +231,40 @@ namespace
                 return false;
             }
         }
+        return true;
+    }
+
+    bool LooksLikeWktUtf8(const std::string& text)
+    {
+        if (text.size() < 8)
+        {
+            return false;
+        }
+
+        // 轻量判断：在前 32 个字符内出现 '['，且其前缀主要由字母/数字/'_'/' ' 组成。
+        // 这不是严格解析，仅用于选择更快的 WKT 解析路径。
+        const size_t bracketPos = text.find('[');
+        if (bracketPos == std::string::npos || bracketPos > 32)
+        {
+            return false;
+        }
+
+        // token 需以字母开头
+        if (!std::isalpha(static_cast<unsigned char>(text[0])))
+        {
+            return false;
+        }
+
+        for (size_t i = 0; i < bracketPos; i++)
+        {
+            const unsigned char ch = static_cast<unsigned char>(text[i]);
+            if (std::isalnum(ch) || ch == '_' || ch == ' ')
+            {
+                continue;
+            }
+            return false;
+        }
+
         return true;
     }
 
@@ -541,9 +588,49 @@ namespace
             g_definitionCache.clear();
         }
         {
+            GB_WriteLockGuard guard(g_definitionValidityCacheLock);
+            g_definitionValidityCache.clear();
+        }
+        {
+            GB_WriteLockGuard guard(g_epsgAxisOrderReversedCacheLock);
+            g_epsgAxisOrderReversedCache.clear();
+        }
+        {
+            GB_WriteLockGuard guard(g_wktAxisOrderReversedCacheLock);
+            g_wktAxisOrderReversedCache.clear();
+        }
+        {
+            GB_WriteLockGuard guard(g_definitionAxisOrderReversedCacheLock);
+            g_definitionAxisOrderReversedCache.clear();
+        }
+        {
             GB_WriteLockGuard guard(g_validAreaCacheLock);
             g_validAreaCache.clear();
         }
+    }
+
+    bool IsAxisOrderReversedByAuthorityInternal(const GeoCrs& crs)
+    {
+        if (!crs.IsValid())
+        {
+            return false;
+        }
+
+        const OGRSpatialReference* srsPtr = crs.GetConst();
+        if (srsPtr == nullptr)
+        {
+            return false;
+        }
+
+        // 注意：OSREPSGTreatsAsLatLong/OSREPSGTreatsAsNorthingEasting 判断的是“权威/规范轴序”是否为 Y/X。
+        // 这与 srs 当前的 axis mapping strategy（例如传统 GIS 顺序）无关。
+        const OGRSpatialReferenceH srsHandle = reinterpret_cast<OGRSpatialReferenceH>(const_cast<OGRSpatialReference*>(srsPtr));
+        if (srsHandle == nullptr)
+        {
+            return false;
+        }
+
+        return OSREPSGTreatsAsLatLong(srsHandle) != 0 || OSREPSGTreatsAsNorthingEasting(srsHandle) != 0;
     }
 
     int ParseEpsgCodeFromStringUtf8(const std::string& epsgCodeUtf8)
@@ -554,26 +641,60 @@ namespace
             return 0;
         }
 
-        // 允许："EPSG:4326" / "epsg:4326" / "4326"。
+        // 允许：
+        //  1) "EPSG:4326" / "epsg:4326" / "4326"
+        //  2) "urn:ogc:def:crs:EPSG::4326" / "urn:ogc:def:crs:EPSG:<ver>:4326"
+        //  3) "http(s)://www.opengis.net/def/crs/EPSG/0/4326"
         std::string codePart = trimmed;
-        if (trimmed.size() >= 5)
-        {
-            const char e0 = static_cast<char>(std::tolower(static_cast<unsigned char>(trimmed[0])));
-            const char e1 = static_cast<char>(std::tolower(static_cast<unsigned char>(trimmed[1])));
-            const char e2 = static_cast<char>(std::tolower(static_cast<unsigned char>(trimmed[2])));
-            const char e3 = static_cast<char>(std::tolower(static_cast<unsigned char>(trimmed[3])));
-            if (e0 == 'e' && e1 == 'p' && e2 == 's' && e3 == 'g')
+
+        auto StartsWithIgnoreCaseAscii = [](const std::string& text, const std::string& prefix) -> bool
             {
-                const size_t colonPos = trimmed.find(':');
-                if (colonPos != std::string::npos)
+                if (text.size() < prefix.size())
                 {
-                    codePart = GB_Utf8Trim(trimmed.substr(colonPos + 1));
+                    return false;
                 }
-                else
+                for (size_t i = 0; i < prefix.size(); i++)
                 {
-                    return 0;
+                    const unsigned char a = static_cast<unsigned char>(text[i]);
+                    const unsigned char b = static_cast<unsigned char>(prefix[i]);
+                    if (std::tolower(a) != std::tolower(b))
+                    {
+                        return false;
+                    }
                 }
+                return true;
+            };
+
+        // 1) EPSG:xxxx
+        if (StartsWithIgnoreCaseAscii(trimmed, "EPSG"))
+        {
+            const size_t colonPos = trimmed.find(':');
+            if (colonPos == std::string::npos)
+            {
+                return 0;
             }
+            codePart = GB_Utf8Trim(trimmed.substr(colonPos + 1));
+        }
+        // 2) urn:ogc:def:crs:EPSG::xxxx (或带版本号)
+        else if (StartsWithIgnoreCaseAscii(trimmed, "urn:ogc:def:crs:epsg:"))
+        {
+            const size_t lastColon = trimmed.find_last_of(':');
+            if (lastColon == std::string::npos)
+            {
+                return 0;
+            }
+            codePart = GB_Utf8Trim(trimmed.substr(lastColon + 1));
+        }
+        // 3) http(s)://www.opengis.net/def/crs/EPSG/0/xxxx
+        else if (StartsWithIgnoreCaseAscii(trimmed, "http://www.opengis.net/def/crs/epsg/") ||
+            StartsWithIgnoreCaseAscii(trimmed, "https://www.opengis.net/def/crs/epsg/"))
+        {
+            const size_t lastSlash = trimmed.find_last_of('/');
+            if (lastSlash == std::string::npos)
+            {
+                return 0;
+            }
+            codePart = GB_Utf8Trim(trimmed.substr(lastSlash + 1));
         }
 
         if (codePart.empty())
@@ -607,6 +728,7 @@ namespace
         }
 
         return static_cast<int>(value);
+
     }
 } // namespace
 
@@ -722,17 +844,29 @@ std::shared_ptr<const GeoCrs> GeoCrsManager::GetWebMercator()
     return GetFromEpsgCached(3857);
 }
 
-std::string GeoCrsManager::EpsgCodeToWktUtf8(const std::string& epsgCodeUtf8)
+std::string GeoCrsManager::UserInputToWktUtf8(const std::string& definitionUtf8, bool allowNetworkAccess, bool allowFileAccess)
 {
     EnsureInitializedInternal();
 
-    const int epsgCode = ParseEpsgCodeFromStringUtf8(epsgCodeUtf8);
-    if (epsgCode <= 0)
+    const std::string trimmed = GB_Utf8Trim(definitionUtf8);
+    if (trimmed.empty())
     {
         return "";
     }
 
-    const std::shared_ptr<const GeoCrs> crs = GetFromEpsgCached(epsgCode);
+    // 对于显式 EPSG 输入走更快的缓存通道，避免重复走 SetFromUserInput 的通用解析路径。
+    const int epsgCode = ParseEpsgCodeFromStringUtf8(trimmed);
+
+    std::shared_ptr<const GeoCrs> crs;
+    if (epsgCode > 0)
+    {
+        crs = GetFromEpsgCached(epsgCode);
+    }
+    else
+    {
+        crs = GetFromDefinitionCached(trimmed, allowNetworkAccess, allowFileAccess);
+    }
+
     if (!crs || !crs->IsValid())
     {
         return "";
@@ -740,6 +874,7 @@ std::string GeoCrsManager::EpsgCodeToWktUtf8(const std::string& epsgCodeUtf8)
 
     return crs->ExportToWktUtf8(GeoCrs::WktFormat::Wkt2_2018, false);
 }
+
 
 std::string GeoCrsManager::WktToEpsgCodeUtf8(const std::string& wktUtf8)
 {
@@ -828,8 +963,17 @@ std::shared_ptr<const GeoCrs> GeoCrsManager::GetFromDefinitionCached(const std::
         g_definitionCache.emplace(key, crs);
     }
 
+
+    // 也同步写入 validity cache（避免重复解析）
+    {
+        const bool valid = crs ? crs->IsValid() : false;
+        GB_WriteLockGuard writeGuard(g_definitionValidityCacheLock);
+        g_definitionValidityCache.emplace(key, valid);
+    }
+
     return crs;
 }
+
 
 bool GeoCrsManager::IsWktValidCached(const std::string& wktUtf8)
 {
@@ -878,6 +1022,167 @@ bool GeoCrsManager::IsWktValidCached(const std::string& wktUtf8)
 
     return valid;
 }
+
+bool GeoCrsManager::IsDefinitionValidCached(const std::string& definitionUtf8, bool allowNetworkAccess, bool allowFileAccess)
+{
+    EnsureInitializedInternal();
+
+    const std::string trimmed = GB_Utf8Trim(definitionUtf8);
+    if (trimmed.empty())
+    {
+        return false;
+    }
+
+    // 若明显是 WKT，则走专用的 WKT 校验缓存（更快且更省内存）。
+    if (LooksLikeWktUtf8(trimmed))
+    {
+        return IsWktValidCached(trimmed);
+    }
+
+    // 对于显式 EPSG 输入走更快的缓存通道，避免重复走 SetFromUserInput 的通用解析路径。
+    const int epsgCode = ParseEpsgCodeFromStringUtf8(trimmed);
+    if (epsgCode > 0)
+    {
+        const std::shared_ptr<const GeoCrs> crs = GetFromEpsgCached(epsgCode);
+        return crs && crs->IsValid();
+    }
+
+    const DefinitionKey key{ trimmed, allowNetworkAccess, allowFileAccess };
+
+    {
+        GB_ReadLockGuard readGuard(g_definitionValidityCacheLock);
+        const auto it = g_definitionValidityCache.find(key);
+        if (it != g_definitionValidityCache.end())
+        {
+            return it->second;
+        }
+    }
+
+    // 若 CRS 缓存已有，也可直接复用。
+    {
+        GB_ReadLockGuard readGuard(g_definitionCacheLock);
+        const auto it = g_definitionCache.find(key);
+        if (it != g_definitionCache.end() && it->second)
+        {
+            const bool valid = it->second->IsValid();
+            GB_WriteLockGuard writeGuard(g_definitionValidityCacheLock);
+            g_definitionValidityCache.emplace(key, valid);
+            return valid;
+        }
+    }
+
+    const GeoCrs temp = GeoCrs::CreateFromUserInput(trimmed, allowNetworkAccess, allowFileAccess);
+    const bool valid = temp.IsValid();
+
+    {
+        GB_WriteLockGuard writeGuard(g_definitionValidityCacheLock);
+        const auto it = g_definitionValidityCache.find(key);
+        if (it != g_definitionValidityCache.end())
+        {
+            return it->second;
+        }
+        g_definitionValidityCache.emplace(key, valid);
+    }
+
+    return valid;
+}
+
+
+bool GeoCrsManager::IsDefinitionAxisOrderReversedCached(const std::string& definitionUtf8, bool allowNetworkAccess, bool allowFileAccess)
+{
+    EnsureInitializedInternal();
+
+    const std::string trimmed = GB_Utf8Trim(definitionUtf8);
+    if (trimmed.empty())
+    {
+        return false;
+    }
+
+    // 若明显是 WKT，则走专用的 WKT 缓存（更快且更省内存）。
+    if (LooksLikeWktUtf8(trimmed))
+    {
+        {
+            GB_ReadLockGuard readGuard(g_wktAxisOrderReversedCacheLock);
+            const auto it = g_wktAxisOrderReversedCache.find(trimmed);
+            if (it != g_wktAxisOrderReversedCache.end())
+            {
+                return it->second;
+            }
+        }
+
+        const std::shared_ptr<const GeoCrs> crs = GetFromWktCached(trimmed);
+        const bool reversed = crs ? IsAxisOrderReversedByAuthorityInternal(*crs) : false;
+
+        {
+            GB_WriteLockGuard writeGuard(g_wktAxisOrderReversedCacheLock);
+            const auto it = g_wktAxisOrderReversedCache.find(trimmed);
+            if (it != g_wktAxisOrderReversedCache.end())
+            {
+                return it->second;
+            }
+            g_wktAxisOrderReversedCache.emplace(trimmed, reversed);
+        }
+
+        return reversed;
+    }
+
+    // 对于显式 EPSG 输入走更快的缓存通道。
+    const int epsgCode = ParseEpsgCodeFromStringUtf8(trimmed);
+    if (epsgCode > 0)
+    {
+        {
+            GB_ReadLockGuard readGuard(g_epsgAxisOrderReversedCacheLock);
+            const auto it = g_epsgAxisOrderReversedCache.find(epsgCode);
+            if (it != g_epsgAxisOrderReversedCache.end())
+            {
+                return it->second;
+            }
+        }
+
+        const std::shared_ptr<const GeoCrs> crs = GetFromEpsgCached(epsgCode);
+        const bool reversed = crs ? IsAxisOrderReversedByAuthorityInternal(*crs) : false;
+
+        {
+            GB_WriteLockGuard writeGuard(g_epsgAxisOrderReversedCacheLock);
+            const auto it = g_epsgAxisOrderReversedCache.find(epsgCode);
+            if (it != g_epsgAxisOrderReversedCache.end())
+            {
+                return it->second;
+            }
+            g_epsgAxisOrderReversedCache.emplace(epsgCode, reversed);
+        }
+
+        return reversed;
+    }
+
+    const DefinitionKey key{ trimmed, allowNetworkAccess, allowFileAccess };
+
+    {
+        GB_ReadLockGuard readGuard(g_definitionAxisOrderReversedCacheLock);
+        const auto it = g_definitionAxisOrderReversedCache.find(key);
+        if (it != g_definitionAxisOrderReversedCache.end())
+        {
+            return it->second;
+        }
+    }
+
+    // 复用 CRS 缓存（避免重复解析）。
+    const std::shared_ptr<const GeoCrs> crs = GetFromDefinitionCached(trimmed, allowNetworkAccess, allowFileAccess);
+    const bool reversed = crs ? IsAxisOrderReversedByAuthorityInternal(*crs) : false;
+
+    {
+        GB_WriteLockGuard writeGuard(g_definitionAxisOrderReversedCacheLock);
+        const auto it = g_definitionAxisOrderReversedCache.find(key);
+        if (it != g_definitionAxisOrderReversedCache.end())
+        {
+            return it->second;
+        }
+        g_definitionAxisOrderReversedCache.emplace(key, reversed);
+    }
+
+    return reversed;
+}
+
 
 std::shared_ptr<const GeoCrs> GeoCrsManager::GetFromWktCached(const std::string& wktUtf8)
 {

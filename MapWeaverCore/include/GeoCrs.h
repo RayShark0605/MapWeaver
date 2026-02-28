@@ -43,7 +43,7 @@ public:
 
     static GeoCrs CreateFromWkt(const std::string& wktUtf8);
 
-    static GeoCrs CreateFromUserInput(const std::string& definitionUtf8, bool allowNetworkAccess = false, bool allowFileAccess = false);
+    static GeoCrs CreateFromUserInput(const std::string& definitionUtf8, bool allowNetworkAccess = true, bool allowFileAccess = true);
 
     // 获取唯一标识符
     // - 若 CRS 自身带 EPSG 权威码，则返回 "EPSG:<code>"。

@@ -45,9 +45,15 @@ public:
 	static std::shared_ptr<const GeoCrs> GetWgs84();       // EPSG:4326
 	static std::shared_ptr<const GeoCrs> GetWebMercator(); // EPSG:3857
 
-	// 输入 UTF-8 编码的 EPSG Code（例如 "EPSG:4326"）返回对应的 UTF-8 编码 WKT（默认 WKT2_2018）。
+	// 输入 UTF-8 编码的 CRS 定义（类似于 GDAL/OGR 的 SetFromUserInput 支持的输入），返回对应的 UTF-8 编码 WKT（默认 WKT2_2018）。
+	// 典型输入示例：
+	//  - "EPSG:3857" / "3857"
+	//  - "urn:ogc:def:crs:EPSG::3857"
+	//  - "CRS:84"
+	//  - WKT / PROJ.4 / PROJJSON / *.prj 文件路径 等（取决于 allowFileAccess）
 	// 若输入非法或无法解析/导出，则返回空串。
-	static std::string EpsgCodeToWktUtf8(const std::string& epsgCodeUtf8);
+	// - allowNetworkAccess / allowFileAccess 的语义与 GeoCrs::CreateFromUserInput 一致。
+	static std::string UserInputToWktUtf8(const std::string& definitionUtf8, bool allowNetworkAccess = true, bool allowFileAccess = true);
 
 	// 输入 UTF-8 编码的 WKT，尝试返回对应的 UTF-8 编码 EPSG Code（例如 "EPSG:4326"）。
 	// 说明：
@@ -61,10 +67,29 @@ public:
 
 	// 按用户输入定义获取（带缓存）。definitionUtf8 可为 "EPSG:4326"、WKT、PROJJSON 等。
 	// allowNetworkAccess / allowFileAccess 的语义与 GeoCrs::CreateFromUserInput 一致。
-	static std::shared_ptr<const GeoCrs> GetFromDefinitionCached(const std::string& definitionUtf8, bool allowNetworkAccess = false, bool allowFileAccess = false);
+	static std::shared_ptr<const GeoCrs> GetFromDefinitionCached(const std::string& definitionUtf8, bool allowNetworkAccess = true, bool allowFileAccess = true);
 
 	// 带缓存地判断 WKT 是否有效。
 	static bool IsWktValidCached(const std::string& wktUtf8);
+
+	// 带缓存地判断 CRS 定义（用户输入）是否有效。definitionUtf8 支持 OGRSpatialReference::SetFromUserInput() 可识别的各种输入：
+	// 例如 "EPSG:3857"、"urn:ogc:def:crs:EPSG::3857"、"CRS:84"、WKT、PROJJSON、PROJ.4 等。
+	// allowNetworkAccess / allowFileAccess 的语义与 GeoCrs::CreateFromUserInput 一致。
+	static bool IsDefinitionValidCached(const std::string& definitionUtf8, bool allowNetworkAccess = true, bool allowFileAccess = true);
+
+	// 带缓存地判断 CRS 定义（用户输入）是否为“反转坐标轴顺序”（Y/X，而非 X/Y）。
+	// 语义说明：
+	//  - 地理坐标系：若权威轴序为 (Lat, Lon)（即 EPSG:4326 的默认权威轴序），则认为是反转；
+	//  - 投影坐标系：若权威轴序为 (Northing, Easting)，则认为是反转。
+	// 典型示例：
+	//  - "EPSG:4326"      -> true
+	//  - "CRS:84"         -> false（OGC:CRS84 是 (Lon, Lat)）
+	//  - "EPSG:3857"      -> false
+	//  - "urn:ogc:def:crs:EPSG::3857" -> false
+	// 说明：
+	//  - 本接口仅判断“权威/规范轴序”是否为 Y/X；不会修改或影响 GeoCrs 对象自身的坐标轴映射策略。
+	//  - allowNetworkAccess / allowFileAccess 的语义与 GeoCrs::CreateFromUserInput 一致。
+	static bool IsDefinitionAxisOrderReversedCached(const std::string& definitionUtf8, bool allowNetworkAccess = true, bool allowFileAccess = true);
 
 	// 带缓存地获取一个 GeoCrs（WKT 解析）。
 	// 注意：返回的是共享只读对象；如需可写对象，请拷贝一份。
@@ -92,5 +117,7 @@ private:
 	GeoCrsManager(const GeoCrsManager&) = delete;
 	GeoCrsManager& operator=(const GeoCrsManager&) = delete;
 };
+
+#define GB_ToWkt(str) GeoCrsManager::UserInputToWktUtf8(str, true, true)
 
 #endif

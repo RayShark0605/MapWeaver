@@ -1,10 +1,10 @@
 ﻿#include "../MapWeaverCore/include/MapWeaverCore.h"
+#include "../MapWeaverCore/include/GeoCrsManager.h"
 #include "GB_Logger.h"
 #include "GB_FileSystem.h"
 #include "GB_Interval.h"
 #include "GB_DateTime.h"
 #include "GB_IO.h"
-#include "../MapWeaverCore/include/GeoCrsManager.h"
 #include <iostream>
 
 int main(int argc, char* argv[])
