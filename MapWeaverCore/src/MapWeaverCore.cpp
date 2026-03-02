@@ -237,9 +237,10 @@ namespace
 				else if (GB_Utf8Equals(nodeName, GB_STR("Capability"), false) || GB_Utf8Equals(nodeName, GB_STR("ows:OperationsMetadata"), false))
 				{
 					ParseCapability(curNode, capabilitiesProperty.capability);
-
-
 				}
+
+
+
 
 
 
@@ -389,13 +390,108 @@ namespace
 				}
 				else if (GB_Utf8Equals(nodeName, GB_STR("ows:Operation"), false) || GB_Utf8Equals(nodeName, GB_STR("Operation"), false))
 				{
+					const std::string operationName = GetXmlNodeAttribute(curNode, GB_STR("name"));
+					CPLXMLNode* dcpNode = FindChildElement(curNode, GB_STR("ows:DCP"));
+					if (dcpNode)
+					{
+						CPLXMLNode* httpNode = FindChildElement(dcpNode, GB_STR("ows:HTTP"));
+						if (httpNode)
+						{
+							CPLXMLNode* getNode = FindChildElement(httpNode, GB_STR("ows:Get"));
+							if (getNode)
+							{
+								const std::string href = GetXmlNodeAttribute(getNode, GB_STR("xlink:href"));
+								WmsDcpTypeProperty dcp;
+								dcp.http.get.onlineResource.xlinkHrefUtf8 = href;
 
+								WmsOperationType* operationType = nullptr;
+								if (!href.empty())
+								{
+									if (GB_Utf8Equals(operationName, GB_STR("GetTile"), false))
+									{
+										operationType = &capabilityProperty.request.getTile;
+									}
+									else if (GB_Utf8Equals(operationName, GB_STR("GetFeatureInfo"), false))
+									{
+										operationType = &capabilityProperty.request.getFeatureInfo;
+									}
+									else if (GB_Utf8Equals(operationName, GB_STR("GetLegendGraphic"), false) || GB_Utf8Equals(operationName, GB_STR("sld:GetLegendGraphic"), false))
+									{
+										operationType = &capabilityProperty.request.getLegendGraphic;
+									}
+								}
 
+								if (operationType)
+								{
+									operationType->dcpTypes.push_back(dcp);
+									operationType->allowedEncodingsUtf8.clear();
 
+									CPLXMLNode* constraintsNode = FindChildElement(getNode, GB_STR("ows:Constraint"));
+									if (constraintsNode)
+									{
+										CPLXMLNode* allowedValuesNode = FindChildElement(constraintsNode, GB_STR("ows:AllowedValues"));
+										if (allowedValuesNode)
+										{
+											for (CPLXMLNode* valueNode = allowedValuesNode->psChild; valueNode != nullptr; valueNode = valueNode->psNext)
+											{
+												if (valueNode->eType != CXT_Element)
+												{
+													continue;
+												}
+
+												const std::string valueNodeName = GetXmlNodeTagName(valueNode);
+												if (GB_Utf8Equals(valueNodeName, GB_STR("ows:Value"), false))
+												{
+													const std::string encodingValue = GetXmlNodeValue(valueNode);
+													if (!encodingValue.empty())
+													{
+														operationType->allowedEncodingsUtf8.push_back(encodingValue);
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			if (!tileLayersSupported.empty())
+			{
+				std::unordered_map<std::string, std::string> titles;
+				std::unordered_map<std::string, std::string> abstracts;
+				for (const WmsLayerProperty& layer : layersSupported)
+				{
+					if (layer.nameUtf8.empty())
+					{
+						continue;
+					}
+
+					if (!layer.titleUtf8.empty())
+					{
+						titles[layer.nameUtf8] = layer.titleUtf8;
+					}
+
+					if (!layer.abstractUtf8.empty())
+					{
+						abstracts[layer.nameUtf8] = layer.abstractUtf8;
+					}
 				}
 
+				for (WmtsTileLayer& tileLayer : tileLayersSupported)
+				{
+					if (tileLayer.titleUtf8.empty() && titles.find(tileLayer.identifierUtf8) != titles.end())
+					{
+						tileLayer.titleUtf8 = titles[tileLayer.identifierUtf8];
+					}
 
-
+					if (tileLayer.abstractUtf8.empty() && abstracts.find(tileLayer.identifierUtf8) != abstracts.end())
+					{
+						tileLayer.abstractUtf8 = abstracts[tileLayer.identifierUtf8];
+					}
+				}
 			}
 		}
 
