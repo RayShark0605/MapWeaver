@@ -116,6 +116,13 @@ public:
 
     UnitsInfo GetAngularUnits() const;
 
+    // 获取/计算该 CRS 的 metersPerUnit（每 1 个坐标单位对应多少米）。
+    // - 对于投影/本地 CRS：返回线单位到米的转换系数（例如英尺->米）。
+    // - 对于地理 CRS：返回角单位对应的弧长（基于椭球长半轴，近似等于赤道处的米/度），
+    //   即 metersPerUnit = angularUnitToRadians * semiMajorAxis。
+    // - 若 CRS 为空或无法计算，返回 0。
+    double GetMetersPerUnit() const;
+
     struct LonLatAreaSegment
     {
         double west = 0;
@@ -195,6 +202,10 @@ private:
     //     > 0：EPSG code
     mutable int cachedUidKind = -2;
     mutable std::uint64_t cachedUidWktHash = 0;
+
+    // GetMetersPerUnit() 的缓存
+    mutable bool hasCachedMetersPerUnit = false;
+    mutable double cachedMetersPerUnit = 0.0;
 };
 
 #ifdef _MSC_VER

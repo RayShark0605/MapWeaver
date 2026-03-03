@@ -323,6 +323,9 @@ void GeoCrs::InvalidateCachesNoLock() const
 
 	cachedUidKind = -2;
 	cachedUidWktHash = 0;
+
+	hasCachedMetersPerUnit = false;
+	cachedMetersPerUnit = 0.0;
 }
 
 void GeoCrs::InvalidateCaches() const
@@ -798,6 +801,9 @@ GeoCrs& GeoCrs::operator=(const GeoCrs& other)
 	int otherCachedDefaultEpsgCode = 0;
 	int otherCachedUidKind = -2;
 	std::uint64_t otherCachedUidWktHash = 0;
+	bool otherHasCachedMetersPerUnit = false;
+	double otherCachedMetersPerUnit = 0.0;
+
 
 	{
 		std::lock_guard<std::recursive_mutex> otherLock(other.mutex);
@@ -807,6 +813,8 @@ GeoCrs& GeoCrs::operator=(const GeoCrs& other)
 		otherCachedDefaultEpsgCode = other.cachedDefaultEpsgCode;
 		otherCachedUidKind = other.cachedUidKind;
 		otherCachedUidWktHash = other.cachedUidWktHash;
+		otherHasCachedMetersPerUnit = other.hasCachedMetersPerUnit;
+		otherCachedMetersPerUnit = other.cachedMetersPerUnit;
 
 		if (other.spatialReference)
 		{
@@ -839,6 +847,8 @@ GeoCrs& GeoCrs::operator=(const GeoCrs& other)
 		cachedDefaultEpsgCode = otherCachedDefaultEpsgCode;
 		cachedUidKind = otherCachedUidKind;
 		cachedUidWktHash = otherCachedUidWktHash;
+		hasCachedMetersPerUnit = otherHasCachedMetersPerUnit;
+		cachedMetersPerUnit = otherCachedMetersPerUnit;
 	}
 
 	return *this;
@@ -864,6 +874,8 @@ GeoCrs& GeoCrs::operator=(GeoCrs&& other) noexcept
 	cachedDefaultEpsgCode = other.cachedDefaultEpsgCode;
 	cachedUidKind = other.cachedUidKind;
 	cachedUidWktHash = other.cachedUidWktHash;
+	hasCachedMetersPerUnit = other.hasCachedMetersPerUnit;
+	cachedMetersPerUnit = other.cachedMetersPerUnit;
 
 	if (spatialReference)
 	{
@@ -876,6 +888,8 @@ GeoCrs& GeoCrs::operator=(GeoCrs&& other) noexcept
 		cachedDefaultEpsgCode = 0;
 		cachedUidKind = -2;
 		cachedUidWktHash = 0;
+		hasCachedMetersPerUnit = false;
+		cachedMetersPerUnit = 0.0;
 	}
 
 	// 保持被移动对象可用（置为空 CRS）
@@ -884,6 +898,8 @@ GeoCrs& GeoCrs::operator=(GeoCrs&& other) noexcept
 	other.cachedDefaultEpsgCode = 0;
 	other.cachedUidKind = -2;
 	other.cachedUidWktHash = 0;
+	other.hasCachedMetersPerUnit = false;
+	other.cachedMetersPerUnit = 0.0;
 
 	if (other.spatialReference == nullptr)
 	{
@@ -1355,6 +1371,56 @@ GeoCrs::UnitsInfo GeoCrs::GetAngularUnits() const
 	info.toSI = toRadians;
 	info.nameUtf8 = unitName ? std::string(unitName) : std::string();
 	return info;
+}
+
+double GeoCrs::GetMetersPerUnit() const
+{
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	if (IsEmptyNoLock())
+	{
+		GBLOG_WARNING(GB_STR("【GeoCrs::GetMetersPerUnit】对象为空。"));
+		return 0.0;
+	}
+
+	if (hasCachedMetersPerUnit)
+	{
+		return cachedMetersPerUnit;
+	}
+
+	double metersPerUnit = 0.0;
+
+	// Geographic CRS 的坐标单位为角度/弧度等角单位。这里返回“每 1 个角单位对应的弧长（米）”，
+	// 以椭球长半轴作为半径，近似等于赤道处的米/度。
+	if (spatialReference->IsGeographic() != 0)
+	{
+		const char* angularUnitName = nullptr;
+		const double angularUnitToRadians = spatialReference->GetAngularUnits(&angularUnitName);
+		const double semiMajorAxisMeters = spatialReference->GetSemiMajor(nullptr);
+
+		if (IsFinite(angularUnitToRadians) && angularUnitToRadians > 0.0 &&
+			IsFinite(semiMajorAxisMeters) && semiMajorAxisMeters > 0.0)
+		{
+			metersPerUnit = angularUnitToRadians * semiMajorAxisMeters;
+		}
+	}
+	else
+	{
+		const char* linearUnitName = nullptr;
+		const double linearUnitToMeters = spatialReference->GetLinearUnits(&linearUnitName);
+		if (IsFinite(linearUnitToMeters) && linearUnitToMeters > 0.0)
+		{
+			metersPerUnit = linearUnitToMeters;
+		}
+	}
+
+	if (!IsFinite(metersPerUnit) || metersPerUnit <= 0.0)
+	{
+		metersPerUnit = 0.0;
+	}
+
+	cachedMetersPerUnit = metersPerUnit;
+	hasCachedMetersPerUnit = true;
+	return metersPerUnit;
 }
 
 std::vector<GeoCrs::LonLatAreaSegment> GeoCrs::GetValidAreaLonLatSegments() const
