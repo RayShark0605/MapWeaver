@@ -9,8 +9,8 @@
 #include "cpl_error.h"
 #include "cpl_string.h"
 
-constexpr static double tiandituRenderingPixelSize = 0.0254 / 96;
-constexpr static double standardRenderingPixelSize = 0.00028;
+constexpr static double tiandituRenderingPixelSize = 0.0254 / 96;	// 天地图：0.0254 米（1 英寸）除以 96 像素（常见屏幕分辨率）
+constexpr static double standardRenderingPixelSize = 0.00028;		// 标准：0.28 毫米（0.00028 米）
 
 bool IsUrlForWMTS(const std::string& urlUtf8)
 {
