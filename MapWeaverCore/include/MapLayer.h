@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <map>
 #include "GeoBoundingBox.h"
 #include "GB_DateTime.h"
 #include "GB_Interval.h"
@@ -286,7 +287,7 @@ struct WmtsTileMatrixSet
 	std::vector<std::string> keywordsUtf8;
 	std::string crsUtf8 = "";
 	std::string wkScaleSetUtf8 = "";
-	std::unordered_map<double, WmtsTileMatrix> tileMatrices;
+	std::map<double, WmtsTileMatrix> tileMatrices;
 
 	const WmtsTileMatrix* FindNearestResolution(double targetTileResolution) const;
 
@@ -337,6 +338,7 @@ struct WmtsDimension
 	std::string abstractUtf8 = "";
 	std::vector<std::string> keywordsUtf8;
 	std::string unitOfMeasureUtf8 = "";
+	std::string unitSymbolUtf8 = "";
 	std::string defaultValueUtf8 = "";
 	bool current = false;
 	std::vector<std::string> values;

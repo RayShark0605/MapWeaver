@@ -12,6 +12,15 @@
 constexpr static double tiandituRenderingPixelSize = 0.0254 / 96;	// 天地图：0.0254 米（1 英寸）除以 96 像素（常见屏幕分辨率）
 constexpr static double standardRenderingPixelSize = 0.00028;		// 标准：0.28 毫米（0.00028 米）
 
+enum class RasterIdentifyFormat
+{
+	Unknown = 0,
+	Value = 1,
+	Text = 1 << 1,
+	Html = 1 << 2,
+	Feature = 1 << 3
+};
+
 bool IsUrlForWMTS(const std::string& urlUtf8)
 {
 	// 包含 SERVICE=WMTS 键值对（KVP风格）
@@ -187,9 +196,11 @@ namespace
 		std::unordered_map<std::string, bool> queryableLayerIdCache; // layerId -> isQueryable
 		std::vector<WmsLayerProperty> layersSupported;
 		std::vector<WmtsTileLayer> tileLayersSupported;
+		std::vector<WmtsTheme> tileThemes;
 		std::unordered_map<std::string, WmtsTileMatrixSet> tileMatrixSets;
 		std::string firstTileMatrixSetId = "";
 		WmsCapabilitiesProperty capabilities;
+		std::unordered_map<RasterIdentifyFormat, std::string> identifyFormats;
 
 		bool ParseDom(const std::string& capabilitiesXmlUtf8, WmsCapabilitiesProperty& capabilitiesProperty)
 		{
@@ -246,14 +257,6 @@ namespace
 				{
 					ParseWMTSContents(curNode);
 				}
-				
-
-
-
-
-
-
-
 			}
 			return true;
 		}
@@ -1795,6 +1798,387 @@ namespace
 					}
 				}
 
+				for (CPLXMLNode* boundingBoxNode = layerNode->psChild; boundingBoxNode != nullptr; boundingBoxNode = boundingBoxNode->psNext)
+				{
+					if (boundingBoxNode->eType != CXT_Element)
+					{
+						continue;
+					}
+
+					const std::string nodeName = GetXmlNodeTagName(boundingBoxNode);
+					if (!GB_Utf8Equals(nodeName, GB_STR("ows:BoundingBox"), false))
+					{
+						continue;
+					}
+
+					boundingBox.Reset();
+					const std::vector<std::string> lowerCornerValue = GB_Utf8Split(GetXmlNodeValue(FindChildElement(boundingBoxNode, GB_STR("ows:LowerCorner"))), GB_CHAR(' '));
+					const std::vector<std::string> upperCornerValue = GB_Utf8Split(GetXmlNodeValue(FindChildElement(boundingBoxNode, GB_STR("ows:UpperCorner"))), GB_CHAR(' '));
+					if (lowerCornerValue.size() != 2 || upperCornerValue.size() != 2)
+					{
+						GBLOG_WARNING(GB_Utf8Format("Invalid LowerCorner or UpperCorner value in BoundingBox of Layer '%s'. Expected format is 'x y'. This bounding box will be ignored.", tileLayer.identifierUtf8.c_str()));
+						continue;
+					}
+					
+					boundingBox.rect.Set(GB_ToDouble(GB_Utf8Replace(lowerCornerValue[0], GB_STR(","), GB_STR("."))),
+						GB_ToDouble(GB_Utf8Replace(lowerCornerValue[1], GB_STR(","), GB_STR("."))),
+						GB_ToDouble(GB_Utf8Replace(upperCornerValue[0], GB_STR(","), GB_STR("."))),
+						GB_ToDouble(GB_Utf8Replace(upperCornerValue[1], GB_STR(","), GB_STR("."))));
+
+					std::string srsValue = GetXmlNodeAttribute(boundingBoxNode, GB_STR("SRS"));
+					if (srsValue.empty())
+					{
+						srsValue = GetXmlNodeAttribute(boundingBoxNode, GB_STR("srs"));
+					}
+
+					std::string crsValue = GetXmlNodeAttribute(boundingBoxNode, GB_STR("CRS"));
+					if (crsValue.empty())
+					{
+						crsValue = GetXmlNodeAttribute(boundingBoxNode, GB_STR("crs"));
+					}
+
+					if (!srsValue.empty() && GeoCrsManager::IsDefinitionValidCached(srsValue))
+					{
+						boundingBox.wktUtf8 = GB_ToWkt(srsValue);
+					}
+					else if (!crsValue.empty() && GeoCrsManager::IsDefinitionValidCached(crsValue))
+					{
+						boundingBox.wktUtf8 = GB_ToWkt(crsValue);
+					}
+					if (boundingBox.wktUtf8.empty())
+					{
+						GBLOG_WARNING(GB_Utf8Format("BoundingBox element in Layer '%s' is missing both CRS and SRS attributes, so the bounding box will be ignored.", tileLayer.identifierUtf8.c_str()));
+						continue;
+					}
+
+					bool invert = !parserOptions.ignoreAxisOrientation && GeoCrsManager::IsDefinitionAxisOrderReversedCached(boundingBox.wktUtf8);
+					if (parserOptions.invertAxisOrientation)
+					{
+						invert = !invert;
+					}
+					if (invert)
+					{
+						boundingBox.rect.Set(boundingBox.rect.minY, boundingBox.rect.minX, boundingBox.rect.maxY, boundingBox.rect.maxX);
+					}
+					tileLayer.boundingBoxes.push_back(boundingBox);
+				}
+
+				for (CPLXMLNode* styleNode = layerNode->psChild; styleNode != nullptr; styleNode = styleNode->psNext)
+				{
+					if (styleNode->eType != CXT_Element)
+					{
+						continue;
+					}
+
+					const std::string nodeName = GetXmlNodeTagName(styleNode);
+					if (!GB_Utf8Equals(nodeName, GB_STR("Style"), false))
+					{
+						continue;
+					}
+
+					WmtsStyle style;
+					style.identifierUtf8 = GetXmlNodeValue(FindChildElement(styleNode, GB_STR("ows:Identifier")));
+					style.titleUtf8 = GetXmlNodeValue(FindChildElement(styleNode, GB_STR("ows:Title")));
+					style.abstractUtf8 = GetXmlNodeValue(FindChildElement(styleNode, GB_STR("ows:Abstract")));
+					ParseKeywords(styleNode, style.keywordsUtf8);
+
+					for (CPLXMLNode* legendUrlNode = styleNode->psChild; legendUrlNode != nullptr; legendUrlNode = legendUrlNode->psNext)
+					{
+						if (legendUrlNode->eType != CXT_Element)
+						{
+							continue;
+						}
+						const std::string nodeName = GetXmlNodeTagName(legendUrlNode);
+						if (!GB_Utf8Equals(nodeName, GB_STR("ows:legendURL"), false))
+						{
+							continue;
+						}
+
+						WmtsLegendUrl legendUrl;
+						legendUrl.formatUtf8 = GetXmlNodeValue(FindChildElement(legendUrlNode, GB_STR("format")));
+						legendUrl.minScale = GB_ToDouble(GetXmlNodeValue(FindChildElement(legendUrlNode, GB_STR("minScale"))));
+						legendUrl.maxScale = GB_ToDouble(GetXmlNodeValue(FindChildElement(legendUrlNode, GB_STR("maxScale"))));
+						legendUrl.hrefUtf8 = GetXmlNodeValue(FindChildElement(legendUrlNode, GB_STR("href")));
+						legendUrl.width = static_cast<int>(GB_ToUInt(GetXmlNodeValue(FindChildElement(legendUrlNode, GB_STR("width")))));
+						legendUrl.height = static_cast<int>(GB_ToUInt(GetXmlNodeValue(FindChildElement(legendUrlNode, GB_STR("height")))));
+						style.legendUrls.push_back(legendUrl);
+					}
+
+					CPLXMLNode* legendUrlNode = FindChildElement(styleNode, GB_STR("LegendURL"));
+					if (legendUrlNode)
+					{
+						WmtsLegendUrl legendUrl;
+						legendUrl.formatUtf8 = GetXmlNodeAttribute(legendUrlNode, GB_STR("format"));
+						legendUrl.minScale = GB_ToDouble(GetXmlNodeAttribute(legendUrlNode, GB_STR("minScaleDenominator")));
+						legendUrl.maxScale = GB_ToDouble(GetXmlNodeAttribute(legendUrlNode, GB_STR("maxScaleDenominator")));
+						legendUrl.hrefUtf8 = GetXmlNodeAttribute(legendUrlNode, GB_STR("xlink:href"));
+						legendUrl.width = static_cast<int>(GB_ToUInt(GetXmlNodeAttribute(legendUrlNode, GB_STR("width"))));
+						legendUrl.height = static_cast<int>(GB_ToUInt(GetXmlNodeAttribute(legendUrlNode, GB_STR("height"))));
+						style.legendUrls.push_back(legendUrl);
+					}
+
+					style.isDefault = GB_Utf8Equals(GetXmlNodeAttribute(styleNode, GB_STR("isDefault")), GB_STR("true"), false);
+
+					tileLayer.styles[style.identifierUtf8] = style;
+					if (style.isDefault)
+					{
+						tileLayer.defaultStyleUtf8 = style.identifierUtf8;
+					}
+				}
+
+				if (tileLayer.styles.empty())
+				{
+					GBLOG_WARNING(GB_Utf8Format("No styles found for Layer '%s' in WMTS capabilities. A default style has been generated, but the layer may not render correctly.", tileLayer.identifierUtf8.c_str()));
+					
+					WmtsStyle defaultStyle;
+					defaultStyle.identifierUtf8 = GB_STR("default");
+					defaultStyle.titleUtf8 = GB_STR("Generated default style");
+					defaultStyle.abstractUtf8 = GB_STR("This style was automatically generated because no styles were defined for this layer in the WMTS capabilities.");
+					tileLayer.styles[defaultStyle.identifierUtf8] = defaultStyle;
+				}
+
+				{
+					std::unordered_set<std::string> uniqueFormats;
+					for (CPLXMLNode* formatNode = layerNode->psChild; formatNode != nullptr; formatNode = formatNode->psNext)
+					{
+						if (formatNode->eType != CXT_Element)
+						{
+							continue;
+						}
+
+						const std::string nodeName = GetXmlNodeTagName(formatNode);
+						if (!GB_Utf8Equals(nodeName, GB_STR("Format"), false))
+						{
+							continue;
+						}
+
+						const std::string formatValue = GetXmlNodeValue(formatNode);
+						if (!formatValue.empty() && uniqueFormats.find(formatValue) == uniqueFormats.end())
+						{
+							tileLayer.formats.push_back(formatValue);
+							uniqueFormats.insert(formatValue);
+						}
+					}
+				}
+
+				for (CPLXMLNode* infoFormatNode = layerNode->psChild; infoFormatNode != nullptr; infoFormatNode = infoFormatNode->psNext)
+				{
+					if (infoFormatNode->eType != CXT_Element)
+					{
+						continue;
+					}
+
+					const std::string nodeName = GetXmlNodeTagName(infoFormatNode);
+					if (!GB_Utf8Equals(nodeName, GB_STR("InfoFormat"), false))
+					{
+						continue;
+					}
+
+					const std::string infoFormatValue = GetXmlNodeValue(infoFormatNode);
+					if (!infoFormatValue.empty())
+					{
+						tileLayer.infoFormats.push_back(infoFormatValue);
+					}
+
+					RasterIdentifyFormat identifyFormat = RasterIdentifyFormat::Unknown;
+					if (GB_Utf8Equals(infoFormatValue, GB_STR("MIME"), false) || GB_Utf8Equals(infoFormatValue, GB_STR("text/plain"), false))
+					{
+						identifyFormat = RasterIdentifyFormat::Text;
+					}
+					else if (GB_Utf8Equals(infoFormatValue, GB_STR("text/html"), false))
+					{
+						identifyFormat = RasterIdentifyFormat::Html;
+					}
+					else if (GB_Utf8StartsWith(infoFormatValue, GB_STR("GML."), false) || GB_Utf8Equals(infoFormatValue, GB_STR("application/vnd.ogc.gml"), false) ||
+						GB_Utf8Find(infoFormatValue, GB_STR("gml"), false) >= 0 || GB_Utf8Equals(infoFormatValue, GB_STR("application/json"), false) ||
+						GB_Utf8Equals(infoFormatValue, GB_STR("application/geojson"), false) || GB_Utf8Equals(infoFormatValue, GB_STR("application/geo+json"), false))
+					{
+						identifyFormat = RasterIdentifyFormat::Feature;
+					}
+					else
+					{
+						GBLOG_WARNING(GB_Utf8Format("Unrecognized InfoFormat '%s' in Layer '%s'. This format will be treated as unknown.", infoFormatValue.c_str(), tileLayer.identifierUtf8.c_str()));
+						continue;
+					}
+					identifyFormats[identifyFormat] = infoFormatValue;
+				}
+
+				for (CPLXMLNode* dimensionNode = layerNode->psChild; dimensionNode != nullptr; dimensionNode = dimensionNode->psNext)
+				{
+					if (dimensionNode->eType != CXT_Element)
+					{
+						continue;
+					}
+
+					const std::string nodeName = GetXmlNodeTagName(dimensionNode);
+					if (!GB_Utf8Equals(nodeName, GB_STR("Dimension"), false))
+					{
+						continue;
+					}
+
+					WmtsDimension dimension;
+					dimension.identifierUtf8 = GetXmlNodeValue(FindChildElement(dimensionNode, GB_STR("ows:Identifier")));
+					if (dimension.identifierUtf8.empty())
+					{
+						continue;
+					}
+
+					dimension.titleUtf8 = GetXmlNodeValue(FindChildElement(dimensionNode, GB_STR("ows:Title")));
+					dimension.abstractUtf8 = GetXmlNodeValue(FindChildElement(dimensionNode, GB_STR("ows:Abstract")));
+					ParseKeywords(dimensionNode, dimension.keywordsUtf8);
+					dimension.unitOfMeasureUtf8 = GetXmlNodeValue(FindChildElement(dimensionNode, GB_STR("UOM")));
+					dimension.unitSymbolUtf8 = GetXmlNodeValue(FindChildElement(dimensionNode, GB_STR("unitSymbol")));
+					dimension.defaultValueUtf8 = GetXmlNodeValue(FindChildElement(dimensionNode, GB_STR("Default")));
+					dimension.current = GB_Utf8Equals(GetXmlNodeValue(FindChildElement(dimensionNode, GB_STR("current"))), GB_STR("true"), false);
+					for (CPLXMLNode* dimensionValueNode = dimensionNode->psChild; dimensionValueNode != nullptr; dimensionValueNode = dimensionValueNode->psNext)
+					{
+						if (dimensionValueNode->eType != CXT_Element)
+						{
+							continue;
+						}
+
+						const std::string nodeName = GetXmlNodeTagName(dimensionValueNode);
+						if (!GB_Utf8Equals(nodeName, GB_STR("Value"), false))
+						{
+							continue;
+						}
+						dimension.values.push_back(GetXmlNodeValue(dimensionValueNode));
+					}
+
+					tileLayer.dimensions[dimension.identifierUtf8] = dimension;
+
+					// TODO...
+				}
+
+				for (CPLXMLNode* setLinkNode = layerNode->psChild; setLinkNode != nullptr; setLinkNode = setLinkNode->psNext)
+				{
+					if (setLinkNode->eType != CXT_Element)
+					{
+						continue;
+					}
+
+					const std::string nodeName = GetXmlNodeTagName(setLinkNode);
+					if (!GB_Utf8Equals(nodeName, GB_STR("TileMatrixSetLink"), false))
+					{
+						continue;
+					}
+
+					WmtsTileMatrixSetLink setLink;
+					setLink.tileMatrixSetIdentifierUtf8 = GetXmlNodeValue(FindChildElement(setLinkNode, GB_STR("TileMatrixSet")));
+					if (tileMatrixSets.find(setLink.tileMatrixSetIdentifierUtf8) == tileMatrixSets.end())
+					{
+						GBLOG_WARNING(GB_Utf8Format("TileMatrixSet '%s' referenced in TileMatrixSetLink of Layer '%s' not found. This set link will be ignored.", setLink.tileMatrixSetIdentifierUtf8.c_str(), tileLayer.identifierUtf8.c_str()));
+						continue;
+					}
+
+					const WmtsTileMatrixSet& tileMatrixSet = tileMatrixSets[setLink.tileMatrixSetIdentifierUtf8];
+					for (CPLXMLNode* setLimitsNode = setLinkNode->psChild; setLimitsNode != nullptr; setLimitsNode = setLimitsNode->psNext)
+					{
+						if (setLimitsNode->eType != CXT_Element)
+						{
+							continue;
+						}
+
+						const std::string nodeName = GetXmlNodeTagName(setLimitsNode);
+						if (!GB_Utf8Equals(nodeName, GB_STR("TileMatrixSetLimits"), false))
+						{
+							continue;
+						}
+
+						for (CPLXMLNode* matrixLimitsNode = setLimitsNode->psChild; matrixLimitsNode != nullptr; matrixLimitsNode = matrixLimitsNode->psNext)
+						{
+							if (matrixLimitsNode->eType != CXT_Element)
+							{
+								continue;
+							}
+
+							const std::string nodeName = GetXmlNodeTagName(matrixLimitsNode);
+							if (!GB_Utf8Equals(nodeName, GB_STR("TileMatrixLimits"), false))
+							{
+								continue;
+							}
+
+							const std::string id = GetXmlNodeValue(FindChildElement(matrixLimitsNode, GB_STR("TileMatrix")));
+							bool isValid = false;
+							int matrixWidth = -1, matrixHeight = -1;
+							for (const auto& kvp : tileMatrixSet.tileMatrices)
+							{
+								if (kvp.second.identifierUtf8 == id)
+								{
+									isValid = true;
+									matrixWidth = kvp.second.matrixWidth;
+									matrixHeight = kvp.second.matrixHeight;
+									break;
+								}
+							}
+							if (!isValid)
+							{
+								GBLOG_WARNING(GB_Utf8Format("TileMatrix '%s' referenced in TileMatrixLimits of Layer '%s' and TileMatrixSet '%s' not found. This TileMatrixLimits will be ignored.", id.c_str(), tileLayer.identifierUtf8.c_str(), tileMatrixSet.identifierUtf8.c_str()));
+								continue;
+							}
+
+							WmtsTileMatrixLimits matrixLimits;
+							matrixLimits.rowIndexInterval.lower = static_cast<int>(GB_ToUInt(GetXmlNodeValue(FindChildElement(matrixLimitsNode, GB_STR("MinTileRow")))));
+							matrixLimits.rowIndexInterval.upper = static_cast<int>(GB_ToUInt(GetXmlNodeValue(FindChildElement(matrixLimitsNode, GB_STR("MaxTileRow")))));
+							matrixLimits.colIndexInterval.lower = static_cast<int>(GB_ToUInt(GetXmlNodeValue(FindChildElement(matrixLimitsNode, GB_STR("MinTileCol")))));
+							matrixLimits.colIndexInterval.upper = static_cast<int>(GB_ToUInt(GetXmlNodeValue(FindChildElement(matrixLimitsNode, GB_STR("MaxTileCol")))));
+							isValid = (matrixLimits.colIndexInterval.lower >= 0 && matrixLimits.colIndexInterval.lower < matrixWidth && matrixLimits.colIndexInterval.upper >= 0 && matrixLimits.colIndexInterval.upper < matrixWidth &&
+								matrixLimits.rowIndexInterval.lower >= 0 && matrixLimits.rowIndexInterval.lower < matrixHeight && matrixLimits.rowIndexInterval.upper >= 0 && matrixLimits.rowIndexInterval.upper < matrixHeight &&
+								matrixLimits.colIndexInterval.lower <= matrixLimits.colIndexInterval.upper && matrixLimits.rowIndexInterval.lower <= matrixLimits.rowIndexInterval.upper);
+							if (!isValid)
+							{
+								GBLOG_WARNING(GB_Utf8Format("Invalid TileMatrixLimits for TileMatrix '%s' in Layer '%s' and TileMatrixSet '%s'. Col index intervals must be within [0, %d] and row index intervals must be within [0, %d], and lower bounds must be less than or equal to upper bounds. This TileMatrixLimits will be ignored.", id.c_str(), tileLayer.identifierUtf8.c_str(), tileMatrixSet.identifierUtf8.c_str(), matrixWidth - 1, matrixHeight - 1));
+								continue;
+							}
+							setLink.limits[id] = matrixLimits;
+						}
+					}
+					tileLayer.setLinks[setLink.tileMatrixSetIdentifierUtf8] = setLink;
+				}
+
+				for (CPLXMLNode* resourceUrlNode = layerNode->psChild; resourceUrlNode != nullptr; resourceUrlNode = resourceUrlNode->psNext)
+				{
+					if (resourceUrlNode->eType != CXT_Element)
+					{
+						continue;
+					}
+
+					const std::string nodeName = GetXmlNodeTagName(resourceUrlNode);
+					if (!GB_Utf8Equals(nodeName, GB_STR("ResourceURL"), false))
+					{
+						continue;
+					}
+
+
+
+
+
+
+
+
+
+
+
+				}
+
+				tileLayersSupported.push_back(tileLayer);
+			}
+
+			tileThemes.clear();
+			for (CPLXMLNode* themeNode = rootNode->psChild; themeNode != nullptr; themeNode = themeNode->psNext)
+			{
+				if (themeNode->eType != CXT_Element)
+				{
+					continue;
+				}
+
+				const std::string nodeName = GetXmlNodeTagName(themeNode);
+				if (!GB_Utf8Equals(nodeName, GB_STR("Theme"), false))
+				{
+					continue;
+				}
+
+
 
 
 
@@ -1805,23 +2189,16 @@ namespace
 
 			}
 
+			for (WmtsTileLayer& tileLayer : tileLayersSupported)
+			{
+				if (tileLayer.boundingBoxes.empty())
+				{
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+				}
+			}
 		}
 
 		bool ShouldInvertAxisOrder(const std::string& wkt) const
