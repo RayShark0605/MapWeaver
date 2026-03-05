@@ -392,6 +392,9 @@ struct WmsCapabilityProperty
 	std::vector<WmsLayerProperty> layers;
 	std::vector<WmtsTileLayer> tileLayers;
 	std::unordered_map<std::string, WmtsTileMatrixSet> tileMatrixSets;
+
+	std::unordered_map<int, int> layerParents;
+	std::unordered_map<int, std::vector<std::string>> layerParentNames;
 };
 
 struct WmsCapabilitiesProperty

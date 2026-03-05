@@ -16,7 +16,7 @@ struct WmsParserOptions
 	bool invertAxisOrientation = false;
 };
 
-MAPWEAVERCORE_PORT bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, WmsCapabilitiesProperty& outCapabilities, const WmsParserOptions& options = WmsParserOptions());
+MAPWEAVERCORE_PORT bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, const std::string& baseUrl, WmsCapabilitiesProperty& outCapabilities, const WmsParserOptions& options = WmsParserOptions());
 
 
 

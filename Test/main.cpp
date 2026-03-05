@@ -12,15 +12,19 @@ int main(int argc, char* argv[])
 	GB_SetConsoleEncodingToUtf8();
 	GB_SetLogToConsole(true);
 
+	const std::string baseUrl = GB_STR("https://ovc.catastro.meh.es/Cartografia/WMS/ServidorWMS.aspx?SERVICE=WMS&REQUEST=GETCAPABILITIES");
+
 	std::string capabilitiesXmlUtf8 = "";
-	if (!DownloadWmsCapabilities(GB_STR("https://ovc.catastro.meh.es/Cartografia/WMS/ServidorWMS.aspx?SERVICE=WMS&REQUEST=GETCAPABILITIES"), capabilitiesXmlUtf8)
-		|| capabilitiesXmlUtf8.empty())
+	if (!DownloadWmsCapabilities(baseUrl, capabilitiesXmlUtf8) || capabilitiesXmlUtf8.empty())
 	{
 		return 1;
 	}
 
 	WmsCapabilitiesProperty capabilities;
-	ParseWmsCapabilities(capabilitiesXmlUtf8, capabilities);
+	if (!ParseWmsCapabilities(capabilitiesXmlUtf8, baseUrl, capabilities))
+	{
+		return 1;
+	}
 
 	return 0;
 }

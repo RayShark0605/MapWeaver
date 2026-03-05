@@ -153,7 +153,7 @@ namespace
 	public:
 		WmsCapabilitiesParser() : valid(false), parserOptions(), numLayers(-1) {}
 
-		bool Parse(const std::string& capabilitiesXmlUtf8, const WmsParserOptions& options)
+		bool Parse(const std::string& capabilitiesXmlUtf8, const WmsParserOptions& options, const std::string& baseUrl)
 		{
 			parserOptions = options;
 			valid = false;
@@ -178,14 +178,62 @@ namespace
 
 			if (!ParseDom(capabilitiesXmlUtf8, capabilities))
 			{
+				GBLOG_WARNING("Failed to parse capabilities XML.");
 				return false;
 			}
 
-
+			for (const std::string& formatValue : capabilities.capability.request.getFeatureInfo.formatsUtf8)
+			{
+				RasterIdentifyFormat format = RasterIdentifyFormat::Unknown;
+				if (GB_Utf8Equals(formatValue, GB_STR("MIME"), false) || GB_Utf8Equals(formatValue, GB_STR("text/plain"), false))
+				{
+					format = RasterIdentifyFormat::Text;
+				}
+				else if (GB_Utf8Equals(formatValue, GB_STR("text/html"), false))
+				{
+					format = RasterIdentifyFormat::Html;
+				}
+				else if (GB_Utf8StartsWith(formatValue, GB_STR("GML."), false) || GB_Utf8Equals(formatValue, GB_STR("application/vnd.ogc.gml"), false) || GB_Utf8Equals(formatValue, GB_STR("application/json"), false) ||
+					GB_Utf8Equals(formatValue, GB_STR("application/geojson"), false) || GB_Utf8Equals(formatValue, GB_STR("application/geo+json"), false) || GB_Utf8Find(formatValue, GB_STR("gml"), false) > 0 ||
+					(GB_Utf8Equals(formatValue, GB_STR("text/xml"), false) && GB_Utf8Find(baseUrl, GB_STR("MapServer"), false) < 0))
+				{
+					format = RasterIdentifyFormat::Feature;
+				}
+				identifyFormats[format] = formatValue;
+			}
 			return true;
 		}
 
+		WmsCapabilitiesProperty GetCapabilities() const
+		{
+			return capabilities;
+		}
 
+		std::vector<WmsLayerProperty> GetWmsLayers() const
+		{
+			return layersSupported;
+		}
+
+		std::vector<std::string> GetSupportedImageEncodings() const
+		{
+			return capabilities.capability.request.getMap.formatsUtf8;
+		}
+
+		void GetLayerParents(std::unordered_map<int, int>& parents, std::unordered_map<int, std::vector<std::string>>& parentNames) const
+		{
+			parents = layerParentIdMap;
+			parentNames = layerParentNamesMap;
+		}
+
+		std::vector<WmtsTileLayer> GetTileLayers() const
+		{
+			return tileLayersSupported;
+		}
+
+		std::unordered_map<std::string, WmtsTileMatrixSet> GetTileMatrixSets() const
+		{
+			return tileMatrixSets;
+		}
 
 	private:
 		bool valid = false;
@@ -2149,16 +2197,50 @@ namespace
 						continue;
 					}
 
+					const std::string format = GetXmlNodeAttribute(resourceUrlNode, GB_STR("format"));
+					const std::string resourceType = GetXmlNodeAttribute(resourceUrlNode, GB_STR("resourceType"));
+					const std::string tmpl = GetXmlNodeAttribute(resourceUrlNode, GB_STR("template"));
+					if (format.empty() || resourceType.empty() || tmpl.empty())
+					{
+						GBLOG_WARNING(GB_Utf8Format("ResourceURL element in Layer '%s' is missing required attributes. All of 'format', 'resourceType', and 'template' attributes are required. This ResourceURL will be ignored.", tileLayer.identifierUtf8.c_str()));
+						continue;
+					}
 
+					if (GB_Utf8Equals(resourceType, GB_STR("tile"), false))
+					{
+						tileLayer.getTileUrls[format] = tmpl;
+					}
+					else if (GB_Utf8Equals(resourceType, GB_STR("FeatureInfo"), false))
+					{
+						tileLayer.getFeatureInfoUrls[format] = tmpl;
 
-
-
-
-
-
-
-
-
+						RasterIdentifyFormat identifyFormat = RasterIdentifyFormat::Unknown;
+						if (GB_Utf8Equals(format, GB_STR("MIME"), false) || GB_Utf8Equals(format, GB_STR("text/plain"), false))
+						{
+							identifyFormat = RasterIdentifyFormat::Text;
+						}
+						else if (GB_Utf8Equals(format, GB_STR("text/html"), false))
+						{
+							identifyFormat = RasterIdentifyFormat::Html;
+						}
+						else if (GB_Utf8StartsWith(format, GB_STR("GML."), false) || GB_Utf8Equals(format, GB_STR("application/vnd.ogc.gml"), false) ||
+							GB_Utf8Find(format, GB_STR("gml"), false) >= 0 || GB_Utf8Equals(format, GB_STR("application/json"), false) ||
+							GB_Utf8Equals(format, GB_STR("application/geojson"), false) || GB_Utf8Equals(format, GB_STR("application/geo+json"), false))
+						{
+							identifyFormat = RasterIdentifyFormat::Feature;
+						}
+						else
+						{
+							GBLOG_WARNING(GB_Utf8Format("Unrecognized format '%s' in ResourceURL of type 'FeatureInfo' in Layer '%s'. This format will be treated as unknown.", format.c_str(), tileLayer.identifierUtf8.c_str()));
+							continue;
+						}
+						identifyFormats[identifyFormat] = format;
+					}
+					else
+					{
+						GBLOG_WARNING(GB_Utf8Format("Unrecognized resourceType '%s' in ResourceURL of Layer '%s'. Only 'tile' and 'FeatureInfo' resource types are recognized. This ResourceURL will be ignored.", resourceType.c_str(), tileLayer.identifierUtf8.c_str()));
+						continue;
+					}
 				}
 
 				tileLayersSupported.push_back(tileLayer);
@@ -2178,26 +2260,58 @@ namespace
 					continue;
 				}
 
-
-
-
-
-
-
-
-
-
+				WmtsTheme theme;
+				ParseTheme(themeNode, theme);
+				tileThemes.push_back(theme);
 			}
 
 			for (WmtsTileLayer& tileLayer : tileLayersSupported)
 			{
 				if (tileLayer.boundingBoxes.empty())
 				{
-
-
-
-
+					if (!DetectTileLayerBoundingBox(tileLayer))
+					{
+						GBLOG_WARNING(GB_Utf8Format("No bounding box found for Layer '%s'. This layer may not render correctly.", tileLayer.identifierUtf8.c_str()));
+						const static GeoBoundingBox defaultBoundingBox(GB_ToWkt("CRS:84"), GB_Rectangle(-180, -90, 180, 90));
+						tileLayer.boundingBoxes.push_back(defaultBoundingBox);
+					}
 				}
+			}
+		}
+
+		void ParseTheme(const CPLXMLNode* rootNode, WmtsTheme& theme)
+		{
+			theme.identifierUtf8 = GetXmlNodeValue(FindChildElement(rootNode, GB_STR("ows:Identifier")));
+			theme.titleUtf8 = GetXmlNodeValue(FindChildElement(rootNode, GB_STR("ows:Title")));
+			theme.abstractUtf8 = GetXmlNodeValue(FindChildElement(rootNode, GB_STR("ows:Abstract")));
+			ParseKeywords(rootNode, theme.keywordsUtf8);
+
+			const CPLXMLNode* themeNode = FindChildElement(rootNode, GB_STR("ows:Theme"));
+			if (themeNode)
+			{
+				theme.subTheme = new WmtsTheme();
+				ParseTheme(themeNode, *theme.subTheme);
+			}
+			else
+			{
+				theme.subTheme = nullptr;
+			}
+
+			theme.layerRefs.clear();
+			for (CPLXMLNode* layerRefNode = rootNode->psChild; layerRefNode != nullptr; layerRefNode = layerRefNode->psNext)
+			{
+				if (layerRefNode->eType != CXT_Element)
+				{
+					continue;
+				}
+
+				const std::string nodeName = GetXmlNodeTagName(layerRefNode);
+				if (!GB_Utf8Equals(nodeName, GB_STR("ows:LayerRef"), false))
+				{
+					continue;
+				}
+
+				theme.layerRefs.push_back(GetXmlNodeValue(layerRefNode));
 			}
 		}
 
@@ -2230,23 +2344,67 @@ namespace
 			const std::string& dcpType = capabilities.capability.request.getTile.dcpTypes[0].http.get.onlineResource.xlinkHrefUtf8;
 			return GB_Utf8Find(dcpType, GB_STR("tianditu"), false) > 0;
 		}
+
+		bool DetectTileLayerBoundingBox(WmtsTileLayer& tileLayer)
+		{
+			if (tileLayer.setLinks.empty())
+			{
+				return false;
+			}
+
+			for (const auto& kvp : tileLayer.setLinks)
+			{
+				const WmtsTileMatrixSetLink& setLink = kvp.second;
+				const auto it = tileMatrixSets.find(setLink.tileMatrixSetIdentifierUtf8);
+				if (it == tileMatrixSets.end())
+				{
+					continue;
+				}
+
+				const std::shared_ptr<const GeoCrs> crs = GeoCrsManager::GetFromDefinitionCached(it->second.crsUtf8);
+				if (!GeoCrsManager::IsDefinitionValidCached(it->second.crsUtf8) || !crs)
+				{
+					continue;
+				}
+
+				auto lastIt = it->second.tileMatrices.end();
+				lastIt--;
+				if (lastIt == it->second.tileMatrices.end())
+				{
+					continue;
+				}
+
+				const WmtsTileMatrix& tileMatrix = lastIt->second;
+				const double metersPerUnit = crs->GetMetersPerUnit();
+				const double pixelSize = (IsTianditu() ? tiandituRenderingPixelSize : standardRenderingPixelSize);
+				const double resolution = tileMatrix.scaleDenominator * pixelSize / metersPerUnit;
+				const GB_Point2d bottomRight(tileMatrix.topLeft.x + resolution * tileMatrix.tileWidth * tileMatrix.matrixWidth, tileMatrix.topLeft.y - resolution * tileMatrix.tileHeight * tileMatrix.matrixHeight);
+				GB_Rectangle extent(tileMatrix.topLeft, bottomRight);
+				extent.Normalize();
+
+				const GeoBoundingBox boundingBoxProperty(crs->ExportToWktUtf8(), extent);
+				tileLayer.boundingBoxes.push_back(boundingBoxProperty);
+			}
+
+			return !tileLayer.boundingBoxes.empty();
+		}
 	};
-
-
-
-
 }
 
-
-
-
-
-
-
-bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, WmsCapabilitiesProperty& outCapabilities, const WmsParserOptions& options)
+bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, const std::string& baseUrl, WmsCapabilitiesProperty& outCapabilities, const WmsParserOptions& options)
 {
 	outCapabilities = WmsCapabilitiesProperty();
 
 	WmsCapabilitiesParser parser;
-	return parser.Parse(capabilitiesXmlUtf8, options);
+	if (!parser.Parse(capabilitiesXmlUtf8, options, baseUrl))
+	{
+		return false;
+	}
+
+	outCapabilities = parser.GetCapabilities();
+	outCapabilities.capability.layers = parser.GetWmsLayers();
+	outCapabilities.capability.tileLayers = parser.GetTileLayers();
+	outCapabilities.capability.tileMatrixSets = parser.GetTileMatrixSets();
+	parser.GetLayerParents(outCapabilities.capability.layerParents, outCapabilities.capability.layerParentNames);
+	return true;
 }
