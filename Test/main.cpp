@@ -12,7 +12,7 @@ int main(int argc, char* argv[])
 	GB_SetConsoleEncodingToUtf8();
 	GB_SetLogToConsole(true);
 
-	const std::string baseUrl = GB_STR("https://ovc.catastro.meh.es/Cartografia/WMS/ServidorWMS.aspx?SERVICE=WMS&REQUEST=GETCAPABILITIES");
+	const std::string baseUrl = GB_STR("https://demo.cubewerx.com/cubewerx/cubeserv/simple?version=1.3.0&service=WMS&REQUEST=GetCapabilities");
 
 	std::string capabilitiesXmlUtf8 = "";
 	if (!DownloadWmsCapabilities(baseUrl, capabilitiesXmlUtf8) || capabilitiesXmlUtf8.empty())
@@ -26,6 +26,8 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
+	std::vector<WmsTreeNode> outLayerTree;
+	bool success = BuildWmsLayerTree(capabilities, outLayerTree);
 	return 0;
 }
 

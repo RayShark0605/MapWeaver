@@ -394,7 +394,6 @@ struct WmsCapabilityProperty
 	std::unordered_map<std::string, WmtsTileMatrixSet> tileMatrixSets;
 
 	std::unordered_map<int, int> layerParents;
-	std::unordered_map<int, std::vector<std::string>> layerParentNames;
 };
 
 struct WmsCapabilitiesProperty
@@ -418,7 +417,5 @@ enum class WmsDpiMode
 	DpiGeoServer = 4,
 	DpiAll = DpiQGIS | DpiUMN | DpiGeoServer,
 };
-
-
 
 #endif
