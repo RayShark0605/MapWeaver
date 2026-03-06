@@ -9,9 +9,7 @@
 #include "cpl_error.h"
 #include "cpl_string.h"
 
-#include <algorithm>
-#include <functional>
-#include <unordered_set>
+#include "GB_Crypto.h"
 
 constexpr static double tiandituRenderingPixelSize = 0.0254 / 96;	// 天地图：0.0254 米（1 英寸）除以 96 像素（常见屏幕分辨率）
 constexpr static double standardRenderingPixelSize = 0.00028;		// 标准：0.28 毫米（0.00028 米）
@@ -54,6 +52,40 @@ bool IsUrlForWMTS(const std::string& urlUtf8)
 	return false;
 }
 
+static std::string ConvertRawBytesToUtf8(const std::string& rawBytes)
+{
+	try
+	{
+		const int64_t startPos = GB_Utf8Find(rawBytes, GB_STR("encoding=\""), false);
+		if (startPos < 0)
+		{
+			GBLOG_WARNING("Failed to find encoding declaration in XML. Defaulting to UTF-8.");
+			return rawBytes;
+		}
+		const int64_t startEncodingPos = startPos + 10;
+		for (int64_t pos = startEncodingPos; pos <= startEncodingPos + 20; pos++)
+		{
+			if (GB_GetUtf8Char(rawBytes, pos) == GB_CHAR('\"'))
+			{
+				const std::string encoding = GB_Utf8Substr(rawBytes, startEncodingPos, pos - startEncodingPos);
+				if (GB_Utf8Equals(encoding, GB_STR("utf-8"), false) || GB_Utf8Equals(encoding, GB_STR("utf8"), false))
+				{
+					return rawBytes;
+				}
+
+				return GB_BytesToUtf8(rawBytes, encoding);
+			}
+		}
+		return rawBytes;
+	}
+	catch (const std::exception& ex)
+	{
+		GBLOG_WARNING(GB_Utf8Format("Exception while converting raw bytes to UTF-8: %s. Defaulting to UTF-8.", ex.what()));
+		return rawBytes;
+	}
+}
+
+
 bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapabilitiesXmlUtf8, const GB_NetworkRequestOptions& options)
 {
 	std::string urlUtf8 = rawUrlUtf8;
@@ -66,7 +98,8 @@ bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapa
 	GB_NetworkResponse response = GB_RequestUrlData(urlUtf8, options);
 	if (response.ok)
 	{
-		outCapabilitiesXmlUtf8 = response.body;
+		const std::string rawString = response.body;
+		outCapabilitiesXmlUtf8 = ConvertRawBytesToUtf8(rawString);
 		return true;
 	}
 
@@ -75,7 +108,8 @@ bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapa
 	response = GB_RequestUrlData(rawUrlUtf8, options);
 	if (response.ok)
 	{
-		outCapabilitiesXmlUtf8 = response.body;
+		const std::string rawString = response.body;
+		outCapabilitiesXmlUtf8 = ConvertRawBytesToUtf8(rawString);
 		return true;
 	}
 
@@ -2048,7 +2082,6 @@ namespace
 					}
 					else
 					{
-						GBLOG_WARNING(GB_Utf8Format("Unrecognized InfoFormat '%s' in Layer '%s'. This format will be treated as unknown.", infoFormatValue.c_str(), tileLayer.identifierUtf8.c_str()));
 						continue;
 					}
 					identifyFormats[identifyFormat] = infoFormatValue;
@@ -2234,14 +2267,12 @@ namespace
 						}
 						else
 						{
-							GBLOG_WARNING(GB_Utf8Format("Unrecognized format '%s' in ResourceURL of type 'FeatureInfo' in Layer '%s'. This format will be treated as unknown.", format.c_str(), tileLayer.identifierUtf8.c_str()));
 							continue;
 						}
 						identifyFormats[identifyFormat] = format;
 					}
 					else
 					{
-						GBLOG_WARNING(GB_Utf8Format("Unrecognized resourceType '%s' in ResourceURL of Layer '%s'. Only 'tile' and 'FeatureInfo' resource types are recognized. This ResourceURL will be ignored.", resourceType.c_str(), tileLayer.identifierUtf8.c_str()));
 						continue;
 					}
 				}
@@ -2405,7 +2436,7 @@ bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, const std::str
 	}
 
 	outCapabilities = parser.GetCapabilities();
-	outCapabilities.capability.layers = parser.GetWmsLayers();
+	outCapabilities.capability.layers = outCapabilities.capability.layers;
 	outCapabilities.capability.tileLayers = parser.GetTileLayers();
 	outCapabilities.capability.tileMatrixSets = parser.GetTileMatrixSets();
 	parser.GetLayerParents(outCapabilities.capability.layerParents);
@@ -2414,387 +2445,257 @@ bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, const std::str
 
 namespace
 {
-	static WmsTreeNode CreateTreeNode(WmsTreeNode::NodeType nodeType, const std::string& textUtf8)
+	struct SerializeFrame
 	{
-		WmsTreeNode node;
-		node.nodeType = nodeType;
-		node.textUtf8 = textUtf8;
-		return node;
-	}
+		const WmsTreeNode* node = nullptr;
+		size_t depth = 0;
+	};
 
-	static std::string GetPreferredTreeText(const std::string& primaryTextUtf8, const std::string& secondaryTextUtf8, const std::string& fallbackTextUtf8)
+	static size_t CalculateSerializedLength(const WmsTreeNode& rootNode, size_t indentUnitLength)
 	{
-		const std::string primaryText = GB_Utf8Trim(primaryTextUtf8);
-		const std::string secondaryText = GB_Utf8Trim(secondaryTextUtf8);
-		if (!primaryText.empty() && !secondaryText.empty() && !GB_Utf8Equals(primaryText, secondaryText, false))
+		size_t totalLength = 0;
+		bool isFirstLine = true;
+
+		std::vector<SerializeFrame> stack;
+		stack.reserve(64);
+		stack.push_back({ &rootNode, 0 });
+
+		while (!stack.empty())
 		{
-			return primaryText + GB_STR(" (") + secondaryText + GB_STR(")");
-		}
+			const SerializeFrame frame = stack.back();
+			stack.pop_back();
 
-		if (!primaryText.empty())
-		{
-			return primaryText;
-		}
-
-		if (!secondaryText.empty())
-		{
-			return secondaryText;
-		}
-
-		return fallbackTextUtf8;
-	}
-
-	static std::string GetRootNodeText(const std::string& serviceTitleUtf8, const std::string& suffixUtf8)
-	{
-		const std::string trimmedServiceTitle = GB_Utf8Trim(serviceTitleUtf8);
-		if (trimmedServiceTitle.empty())
-		{
-			return suffixUtf8;
-		}
-
-		return trimmedServiceTitle + GB_STR(" ") + suffixUtf8;
-	}
-
-	static std::string GetWmsLayerNodeText(const WmsLayerProperty& layer)
-	{
-		return GetPreferredTreeText(layer.titleUtf8, layer.nameUtf8, GB_STR("Unnamed WMS layer"));
-	}
-
-	static std::string GetWmsStyleNodeText(const WmsStyleProperty& style)
-	{
-		return GetPreferredTreeText(style.titleUtf8, style.nameUtf8, GB_STR("Unnamed style"));
-	}
-
-	static std::string GetWmtsLayerNodeText(const WmtsTileLayer& tileLayer)
-	{
-		return GetPreferredTreeText(tileLayer.titleUtf8, tileLayer.identifierUtf8, GB_STR("Unnamed WMTS layer"));
-	}
-
-	static std::string GetWmtsStyleNodeText(const WmtsStyle& style, bool isDefaultStyle)
-	{
-		std::string textUtf8 = GetPreferredTreeText(style.titleUtf8, style.identifierUtf8, GB_STR("Unnamed style"));
-		if (isDefaultStyle)
-		{
-			textUtf8 += GB_STR(" [default]");
-		}
-		return textUtf8;
-	}
-
-	static std::string GetTileMatrixSetNodeText(const WmtsTileMatrixSet& tileMatrixSet)
-	{
-		std::string textUtf8 = GetPreferredTreeText(tileMatrixSet.titleUtf8, tileMatrixSet.identifierUtf8, GB_STR("Unnamed TileMatrixSet"));
-		const std::string crsText = GB_Utf8Trim(tileMatrixSet.crsUtf8);
-		if (!crsText.empty())
-		{
-			textUtf8 += GB_STR(" [") + crsText + GB_STR("]");
-		}
-		return textUtf8;
-	}
-
-	static void AppendUniqueFormatNodes(const std::vector<std::string>& formatsUtf8, std::vector<WmsTreeNode>& outChildren, const std::string& prefixUtf8 = GB_STR(""))
-	{
-		std::unordered_set<std::string> seenFormats;
-		seenFormats.reserve(formatsUtf8.size());
-
-		for (const std::string& formatUtf8 : formatsUtf8)
-		{
-			const std::string trimmedFormat = GB_Utf8Trim(formatUtf8);
-			if (trimmedFormat.empty())
+			if (!isFirstLine)
 			{
-				continue;
+				totalLength += 1; // '\n'
 			}
+			isFirstLine = false;
 
-			const bool inserted = seenFormats.insert(trimmedFormat).second;
-			if (!inserted)
+			totalLength += frame.depth * indentUnitLength;
+			totalLength += frame.node->textUtf8.size();
+
+			const size_t numChildren = frame.node->children.size();
+			for (size_t i = numChildren; i > 0; i--)
 			{
-				continue;
+				stack.push_back({ &frame.node->children[i - 1], frame.depth + 1 });
 			}
-
-			outChildren.push_back(CreateTreeNode(WmsTreeNode::NodeType::Format, prefixUtf8 + trimmedFormat));
 		}
+
+		return totalLength;
 	}
 
-	static void AppendWmsStyleNodes(const std::vector<WmsStyleProperty>& styles, std::vector<WmsTreeNode>& outChildren)
+	static void AppendIndent(std::string& output, const std::string& indentString, size_t depth)
 	{
-		std::unordered_set<std::string> seenStyleKeys;
-		seenStyleKeys.reserve(styles.size());
-
-		for (const WmsStyleProperty& style : styles)
+		if (indentString.empty() || depth == 0)
 		{
-			const std::string styleKey = GB_Utf8Trim(style.nameUtf8).empty() ? GB_Utf8Trim(style.titleUtf8) : GB_Utf8Trim(style.nameUtf8);
-			if (!styleKey.empty())
-			{
-				const bool inserted = seenStyleKeys.insert(styleKey).second;
-				if (!inserted)
-				{
-					continue;
-				}
-			}
-
-			outChildren.push_back(CreateTreeNode(WmsTreeNode::NodeType::Style, GetWmsStyleNodeText(style)));
-		}
-	}
-
-	static void BuildWmsLayerSubTree(
-		int orderId,
-		const std::vector<WmsLayerProperty>& layers,
-		const std::unordered_map<int, size_t>& layerIndexMap,
-		const std::unordered_map<int, std::vector<int> >& childrenMap,
-		const std::vector<std::string>& getMapFormatsUtf8,
-		std::unordered_map<int, unsigned char>& visitState,
-		WmsTreeNode& outNode)
-	{
-		const auto layerIndexIt = layerIndexMap.find(orderId);
-		if (layerIndexIt == layerIndexMap.end())
-		{
-			outNode = CreateTreeNode(WmsTreeNode::NodeType::Layer, GB_STR("Unknown WMS layer"));
 			return;
 		}
 
-		visitState[orderId] = 1;
-
-		const WmsLayerProperty& layer = layers[layerIndexIt->second];
-		outNode = CreateTreeNode(WmsTreeNode::NodeType::Layer, GetWmsLayerNodeText(layer));
-
-		const auto childrenIt = childrenMap.find(orderId);
-		if (childrenIt != childrenMap.end())
+		for (size_t i = 0; i < depth; i++)
 		{
-			for (const int childOrderId : childrenIt->second)
-			{
-				const auto childStateIt = visitState.find(childOrderId);
-				if (childStateIt != visitState.end() && childStateIt->second == 1)
-				{
-					GBLOG_WARNING(GB_Utf8Format("Detected a cycle while building WMS layer tree. Child orderId=%d will be skipped.", childOrderId));
-					continue;
-				}
-
-				WmsTreeNode childNode;
-				BuildWmsLayerSubTree(childOrderId, layers, layerIndexMap, childrenMap, getMapFormatsUtf8, visitState, childNode);
-				outNode.children.push_back(std::move(childNode));
-			}
+			output.append(indentString);
 		}
+	}
+}
 
-		AppendWmsStyleNodes(layer.styles, outNode.children);
-		AppendUniqueFormatNodes(getMapFormatsUtf8, outNode.children);
+std::string WmsTreeNode::ToString(const std::string& indentStringUtf8) const
+{
+	const size_t totalLength = CalculateSerializedLength(*this, indentStringUtf8.size());
 
-		visitState[orderId] = 2;
+	std::string output;
+	output.reserve(totalLength);
+
+	bool isFirstLine = true;
+
+	std::vector<SerializeFrame> stack;
+	stack.reserve(64);
+	stack.push_back({ this, 0 });
+
+	while (!stack.empty())
+	{
+		const SerializeFrame frame = stack.back();
+		stack.pop_back();
+
+		if (!isFirstLine)
+		{
+			output.push_back('\n');
+		}
+		isFirstLine = false;
+
+		AppendIndent(output, indentStringUtf8, frame.depth);
+		output.append(frame.node->textUtf8);
+
+		const size_t numChildren = frame.node->children.size();
+		for (size_t i = numChildren; i > 0; i--)
+		{
+			stack.push_back({ &frame.node->children[i - 1], frame.depth + 1 });
+		}
+	}
+	return output;
+}
+
+namespace
+{
+	static std::vector<WmsTreeNode> CreateTileLayerFormatNodes(const WmtsTileLayer& tileLayer, const std::string& path)
+	{
+		std::vector<WmsTreeNode> formatNodes;
+		formatNodes.reserve(tileLayer.formats.size());
+		for (const std::string& format : tileLayer.formats)
+		{
+			WmsTreeNode formatNode;
+			formatNode.textUtf8 = format;
+			formatNode.nodeType = WmsTreeNode::NodeType::Format;
+			formatNode.uidUtf8 = GB_Md5Hash(path + "|" + format);
+			formatNodes.push_back(std::move(formatNode));
+		}
+		std::sort(formatNodes.begin(), formatNodes.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
+			return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
+		});
+		return formatNodes;
 	}
 
-	static void AppendWmtsTileMatrixSetNodes(const WmtsTileLayer& tileLayer, const WmsCapabilitiesProperty& capabilities, std::vector<WmsTreeNode>& outChildren)
+	static std::vector<WmsTreeNode> CreateTileLayerTileMatrixSetNodes(const WmtsTileLayer& tileLayer, const BuildLayerTreeOptions& options, const std::string& path)
 	{
-		struct TileMatrixSetEntry
-		{
-			std::string sortTextUtf8 = "";
-			WmsTreeNode node;
-		};
-
-		std::vector<TileMatrixSetEntry> entries;
-		entries.reserve(tileLayer.setLinks.size());
-
+		std::vector<WmsTreeNode> tileMatrixSetNodes;
+		tileMatrixSetNodes.reserve(tileLayer.setLinks.size());
 		for (const auto& kvp : tileLayer.setLinks)
 		{
-			const WmtsTileMatrixSetLink& setLink = kvp.second;
-			const auto setIt = capabilities.capability.tileMatrixSets.find(setLink.tileMatrixSetIdentifierUtf8);
-			if (setIt != capabilities.capability.tileMatrixSets.end())
-			{
-				const std::string textUtf8 = GetTileMatrixSetNodeText(setIt->second);
-				TileMatrixSetEntry entry;
-				entry.sortTextUtf8 = textUtf8;
-				entry.node = CreateTreeNode(WmsTreeNode::NodeType::WmtsTileMatrixSet, textUtf8);
-				entries.push_back(std::move(entry));
-			}
-			else
-			{
-				const std::string textUtf8 = GB_Utf8Trim(setLink.tileMatrixSetIdentifierUtf8).empty() ? GB_STR("Unnamed TileMatrixSet") : GB_Utf8Trim(setLink.tileMatrixSetIdentifierUtf8);
-				TileMatrixSetEntry entry;
-				entry.sortTextUtf8 = textUtf8;
-				entry.node = CreateTreeNode(WmsTreeNode::NodeType::WmtsTileMatrixSet, textUtf8);
-				entries.push_back(std::move(entry));
-			}
-		}
+			WmsTreeNode tileMatrixSetNode;
+			tileMatrixSetNode.textUtf8 = kvp.first;
+			tileMatrixSetNode.nodeType = WmsTreeNode::NodeType::WmtsTileMatrixSet;
 
-		std::sort(entries.begin(), entries.end(), [](const TileMatrixSetEntry& left, const TileMatrixSetEntry& right)
+			const std::string currentPath = path + "|" + kvp.first;
+			tileMatrixSetNode.uidUtf8 = GB_Md5Hash(currentPath);
+			if (!options.ignoreUniqueChildNode || tileLayer.formats.size() >= 2)
 			{
-				return left.sortTextUtf8 < right.sortTextUtf8;
-			});
-
-		for (TileMatrixSetEntry& entry : entries)
-		{
-			outChildren.push_back(std::move(entry.node));
+				tileMatrixSetNode.children = CreateTileLayerFormatNodes(tileLayer, currentPath);
+			}
+			tileMatrixSetNodes.push_back(std::move(tileMatrixSetNode));
 		}
+		std::sort(tileMatrixSetNodes.begin(), tileMatrixSetNodes.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
+			return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
+		});
+		return tileMatrixSetNodes;
 	}
 
-	static void AppendWmtsStyleNodes(const WmtsTileLayer& tileLayer, std::vector<WmsTreeNode>& outChildren)
+	static std::vector<WmsTreeNode> CreateTileLayerStyleNodes(const WmtsTileLayer& tileLayer, const BuildLayerTreeOptions& options, const std::string& path)
 	{
-		struct StyleEntry
-		{
-			bool isDefaultStyle = false;
-			std::string sortTextUtf8 = "";
-			WmsTreeNode node;
-		};
-
-		std::vector<StyleEntry> entries;
-		entries.reserve(tileLayer.styles.size());
-
+		std::vector<WmsTreeNode> styleNodes;
+		styleNodes.reserve(tileLayer.styles.size());
 		for (const auto& kvp : tileLayer.styles)
 		{
 			const WmtsStyle& style = kvp.second;
-			const bool isDefaultStyle = (!tileLayer.defaultStyleUtf8.empty() && style.identifierUtf8 == tileLayer.defaultStyleUtf8) || style.isDefault;
-			StyleEntry entry;
-			entry.isDefaultStyle = isDefaultStyle;
-			entry.sortTextUtf8 = GetWmtsStyleNodeText(style, false);
-			entry.node = CreateTreeNode(WmsTreeNode::NodeType::Style, GetWmtsStyleNodeText(style, isDefaultStyle));
-			entries.push_back(std::move(entry));
-		}
+			WmsTreeNode styleNode;
+			styleNode.textUtf8 = style.titleUtf8.empty() ? style.identifierUtf8 : style.titleUtf8;
+			styleNode.nodeType = WmsTreeNode::NodeType::Style;
 
-		std::sort(entries.begin(), entries.end(), [](const StyleEntry& left, const StyleEntry& right)
+			const std::string currentPath = path + "|" + kvp.first;
+			styleNode.uidUtf8 = GB_Md5Hash(currentPath);
+			if (options.ignoreUniqueChildNode)
 			{
-				if (left.isDefaultStyle != right.isDefaultStyle)
+				if (tileLayer.setLinks.size() >= 2)
 				{
-					return left.isDefaultStyle > right.isDefaultStyle;
+					styleNode.children = CreateTileLayerTileMatrixSetNodes(tileLayer, options, currentPath);
 				}
-				return left.sortTextUtf8 < right.sortTextUtf8;
-			});
-
-		for (StyleEntry& entry : entries)
-		{
-			outChildren.push_back(std::move(entry.node));
+				else if (tileLayer.formats.size() >= 2)
+				{
+					styleNode.children = CreateTileLayerFormatNodes(tileLayer, currentPath);
+				}
+			}
+			else
+			{
+				styleNode.children = CreateTileLayerTileMatrixSetNodes(tileLayer, options, currentPath);
+			}
+			styleNodes.push_back(std::move(styleNode));
 		}
+		std::sort(styleNodes.begin(), styleNodes.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
+			return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
+		});
+		return styleNodes;
 	}
 
-	static void AppendWmtsFormatNodes(const WmtsTileLayer& tileLayer, std::vector<WmsTreeNode>& outChildren)
+	static WmsTreeNode CreateTileLayerNode(const WmtsTileLayer& tileLayer, const BuildLayerTreeOptions& options, const std::string& path)
 	{
-		AppendUniqueFormatNodes(tileLayer.formats, outChildren);
-		AppendUniqueFormatNodes(tileLayer.infoFormats, outChildren, GB_STR("InfoFormat: "));
-	}
-}
+		WmsTreeNode layerNode;
+		layerNode.textUtf8 = tileLayer.titleUtf8.empty() ? tileLayer.identifierUtf8 : tileLayer.titleUtf8;
+		layerNode.nodeType = WmsTreeNode::NodeType::Layer;
 
-bool BuildWmsLayerTree(const WmsCapabilitiesProperty& capabilities, std::vector<WmsTreeNode>& outLayerTree)
-{
-	outLayerTree.clear();
+		const std::string currentPath = path + "|" + tileLayer.identifierUtf8;
+		layerNode.uidUtf8 = GB_Md5Hash(currentPath);
 
-	const std::vector<WmsLayerProperty>& wmsLayers = capabilities.capability.layers;
-	const std::vector<WmtsTileLayer>& tileLayers = capabilities.capability.tileLayers;
-	if (wmsLayers.empty() && tileLayers.empty())
-	{
-		return false;
-	}
-
-	const std::string& serviceTitleUtf8 = capabilities.service.titleUtf8;
-
-	if (!wmsLayers.empty())
-	{
-		std::unordered_map<int, size_t> layerIndexMap;
-		layerIndexMap.reserve(wmsLayers.size());
-		for (size_t i = 0; i < wmsLayers.size(); i++)
+		if (options.ignoreUniqueChildNode)
 		{
-			layerIndexMap[wmsLayers[i].orderId] = i;
-		}
-
-		std::unordered_map<int, std::vector<int> > childrenMap;
-		childrenMap.reserve(capabilities.capability.layerParents.size());
-		std::unordered_set<int> attachedChildren;
-		attachedChildren.reserve(capabilities.capability.layerParents.size());
-
-		for (const auto& kvp : capabilities.capability.layerParents)
-		{
-			const int childOrderId = kvp.first;
-			const int parentOrderId = kvp.second;
-			if (childOrderId == parentOrderId)
+			if (tileLayer.styles.size() >= 2)
 			{
-				continue;
+				layerNode.children = CreateTileLayerStyleNodes(tileLayer, options, currentPath);
 			}
-
-			if (layerIndexMap.find(childOrderId) == layerIndexMap.end() || layerIndexMap.find(parentOrderId) == layerIndexMap.end())
+			else if (tileLayer.setLinks.size() >= 2)
 			{
-				continue;
+				layerNode.children = CreateTileLayerTileMatrixSetNodes(tileLayer, options, currentPath);
 			}
-
-			childrenMap[parentOrderId].push_back(childOrderId);
-			attachedChildren.insert(childOrderId);
-		}
-
-		WmsTreeNode wmsRootNode = CreateTreeNode(WmsTreeNode::NodeType::Root, GetRootNodeText(serviceTitleUtf8, GB_STR("WMS layers")));
-		std::unordered_map<int, unsigned char> visitState;
-		visitState.reserve(wmsLayers.size());
-
-		for (const WmsLayerProperty& layer : wmsLayers)
-		{
-			if (attachedChildren.find(layer.orderId) != attachedChildren.end())
+			else if (tileLayer.formats.size() >= 2)
 			{
-				continue;
+				layerNode.children = CreateTileLayerFormatNodes(tileLayer, currentPath);
 			}
-
-			WmsTreeNode layerNode;
-			BuildWmsLayerSubTree(layer.orderId, wmsLayers, layerIndexMap, childrenMap, capabilities.capability.request.getMap.formatsUtf8, visitState, layerNode);
-			wmsRootNode.children.push_back(std::move(layerNode));
-		}
-
-		for (const WmsLayerProperty& layer : wmsLayers)
-		{
-			const auto stateIt = visitState.find(layer.orderId);
-			if (stateIt != visitState.end() && stateIt->second == 2)
-			{
-				continue;
-			}
-
-			WmsTreeNode layerNode;
-			BuildWmsLayerSubTree(layer.orderId, wmsLayers, layerIndexMap, childrenMap, capabilities.capability.request.getMap.formatsUtf8, visitState, layerNode);
-			wmsRootNode.children.push_back(std::move(layerNode));
-		}
-
-		if (!wmsRootNode.children.empty())
-		{
-			outLayerTree.push_back(std::move(wmsRootNode));
-		}
-	}
-
-	std::vector<const WmtsTileLayer*> wmtsLayers;
-	std::vector<const WmtsTileLayer*> wmscLayers;
-	wmtsLayers.reserve(tileLayers.size());
-	wmscLayers.reserve(tileLayers.size());
-	for (const WmtsTileLayer& tileLayer : tileLayers)
-	{
-		if (tileLayer.tileMode == MapTileMode::WMSC)
-		{
-			wmscLayers.push_back(&tileLayer);
 		}
 		else
 		{
-			wmtsLayers.push_back(&tileLayer);
+			layerNode.children = CreateTileLayerStyleNodes(tileLayer, options, currentPath);
 		}
+		std::sort(layerNode.children.begin(), layerNode.children.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
+			return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
+		});
+		return layerNode;
 	}
 
-	const auto AppendTileRoot = [&](const std::vector<const WmtsTileLayer*>& layers, const std::string& rootSuffixUtf8)
+	static WmsTreeNode CreateWmsLayerNode(const WmsLayerProperty& layer, const std::string& path)
+	{
+		WmsTreeNode layerNode;
+		layerNode.textUtf8 = layer.titleUtf8.empty() ? (layer.nameUtf8.empty() ? std::to_string(layer.orderId) : layer.nameUtf8) : layer.titleUtf8;
+		layerNode.nodeType = WmsTreeNode::NodeType::Layer;
+		const std::string currentPath = path + "|" + (layer.nameUtf8.empty() ? std::to_string(layer.orderId) : layer.nameUtf8);
+		layerNode.uidUtf8 = GB_Md5Hash(currentPath);
+
+		layerNode.children.reserve(layer.subLayers.size());
+		for (const WmsLayerProperty& subLayer : layer.subLayers)
 		{
-			if (layers.empty())
-			{
-				return;
-			}
-
-			WmsTreeNode rootNode = CreateTreeNode(WmsTreeNode::NodeType::Root, GetRootNodeText(serviceTitleUtf8, rootSuffixUtf8));
-			for (const WmtsTileLayer* tileLayer : layers)
-			{
-				if (tileLayer == nullptr)
-				{
-					continue;
-				}
-
-				WmsTreeNode layerNode = CreateTreeNode(WmsTreeNode::NodeType::Layer, GetWmtsLayerNodeText(*tileLayer));
-				AppendWmtsTileMatrixSetNodes(*tileLayer, capabilities, layerNode.children);
-				AppendWmtsStyleNodes(*tileLayer, layerNode.children);
-				AppendWmtsFormatNodes(*tileLayer, layerNode.children);
-				rootNode.children.push_back(std::move(layerNode));
-			}
-
-			if (!rootNode.children.empty())
-			{
-				outLayerTree.push_back(std::move(rootNode));
-			}
-		};
-
-	AppendTileRoot(wmtsLayers, GB_STR("WMTS layers"));
-	AppendTileRoot(wmscLayers, GB_STR("WMSC layers"));
-
-	return !outLayerTree.empty();
+			WmsTreeNode subLayerNode = CreateWmsLayerNode(subLayer, currentPath);
+			layerNode.children.push_back(std::move(subLayerNode));
+		}
+		std::sort(layerNode.children.begin(), layerNode.children.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
+			return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
+		});
+		return layerNode;
+	}
 }
+
+bool BuildWmsLayerTree(const WmsCapabilitiesProperty& capabilities, WmsTreeNode& rootNode, const BuildLayerTreeOptions& options)
+{
+	rootNode = WmsTreeNode();
+	rootNode.textUtf8 = capabilities.service.titleUtf8;
+	rootNode.nodeType = WmsTreeNode::NodeType::Root;
+
+	const std::string currentPath = (rootNode.textUtf8.empty() ? GB_STR("root") : rootNode.textUtf8);
+	rootNode.uidUtf8 = GB_Md5Hash(currentPath);
+	rootNode.children.reserve(capabilities.capability.tileLayers.size() + capabilities.capability.layers.size());
+
+	const std::vector<WmtsTileLayer>& tileLayers = capabilities.capability.tileLayers;
+	for (const WmtsTileLayer& tileLayer : tileLayers)
+	{
+		WmsTreeNode layerNode = CreateTileLayerNode(tileLayer, options, currentPath);
+		rootNode.children.push_back(std::move(layerNode));
+	}
+
+	const std::vector<WmsLayerProperty>& layers = capabilities.capability.layers;
+	for (const WmsLayerProperty& layer : layers)
+	{
+		WmsTreeNode layerNode = CreateWmsLayerNode(layer, currentPath);
+		rootNode.children.push_back(std::move(layerNode));
+	}
+
+	std::sort(rootNode.children.begin(), rootNode.children.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
+		return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
+	});
+	return true;
+}
+

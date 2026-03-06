@@ -240,6 +240,81 @@ namespace
 		return std::string(wkt.get());
 	}
 
+	static std::vector<std::string> SplitStringByChar(const std::string& text, char delimiter)
+	{
+		std::vector<std::string> parts;
+		parts.reserve(8);
+
+		size_t beginIndex = 0;
+		for (size_t i = 0; i < text.size(); i++)
+		{
+			if (text[i] == delimiter)
+			{
+				parts.emplace_back(text.substr(beginIndex, i - beginIndex));
+				beginIndex = i + 1;
+			}
+		}
+
+		parts.emplace_back(text.substr(beginIndex));
+		return parts;
+	}
+
+	static bool IsAsciiDigitsAndDots(const std::string& text)
+	{
+		if (text.empty())
+		{
+			return false;
+		}
+
+		for (size_t i = 0; i < text.size(); i++)
+		{
+			const char ch = text[i];
+			if ((ch < '0' || ch > '9') && ch != '.')
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	static bool TryExtractEpsgCodeFromOgcCrsUrn(const std::string& definitionUtf8, int& epsgCode)
+	{
+		epsgCode = 0;
+
+		const std::vector<std::string> parts = SplitStringByChar(definitionUtf8, ':');
+		if (parts.size() < 6)
+		{
+			return false;
+		}
+
+		if (!EqualsIgnoreCaseAscii(parts[0].c_str(), "urn") ||
+			!(EqualsIgnoreCaseAscii(parts[1].c_str(), "ogc") || EqualsIgnoreCaseAscii(parts[1].c_str(), "x-ogc")) ||
+			!EqualsIgnoreCaseAscii(parts[2].c_str(), "def") ||
+			!EqualsIgnoreCaseAscii(parts[3].c_str(), "crs") ||
+			!EqualsIgnoreCaseAscii(parts[4].c_str(), "EPSG"))
+		{
+			return false;
+		}
+
+		for (size_t i = 5; i + 1 < parts.size(); i++)
+		{
+			if (!parts[i].empty() && !IsAsciiDigitsAndDots(parts[i]))
+			{
+				return false;
+			}
+		}
+
+		const int parsedEpsgCode = ParsePositiveInt(parts.back().c_str());
+		if (parsedEpsgCode <= 0)
+		{
+			return false;
+		}
+
+		epsgCode = parsedEpsgCode;
+		return true;
+	}
+
 }
 
 void GeoCrsOgrSrsDeleter::operator()(OGRSpatialReference* srs) const noexcept
@@ -1037,11 +1112,30 @@ bool GeoCrs::SetFromUserInput(const std::string& definitionUtf8, bool allowNetwo
 	const char* const fileOption = allowFileAccess ? "ALLOW_FILE_ACCESS=YES" : "ALLOW_FILE_ACCESS=NO";
 	const char* const options[] = { networkOption, fileOption, nullptr };
 
+	CPLPushErrorHandler(CPLQuietErrorHandler);
+	CPLErrorReset();
 	const OGRErr err = srs->SetFromUserInput(trimmed.c_str(), options);
+	const CPLErr lastErrorType = CPLGetLastErrorType();
+	const CPLErrorNum lastErrorNo = CPLGetLastErrorNo();
+	const std::string lastErrorMessage = CPLGetLastErrorMsg();
+	CPLPopErrorHandler();
+
 	if (err != OGRERR_NONE)
 	{
-		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】SetFromUserInput失败: err=") + std::to_string(static_cast<int>(err)) +
-			GB_STR(", definition=") + trimmed);
+		// 一些 WMTS/WMS 能力文档里会出现历史遗留的 EPSG URN 写法，例如：
+		//   urn:ogc:def:crs:EPSG:6.18:3:3857
+		// 其中 "6.18:3" 实际上是把版本号 "6.18.3" 错误拆成了两个 URN 字段。
+		int epsgCode = 0;
+		if (TryExtractEpsgCodeFromOgcCrsUrn(trimmed, epsgCode))
+		{
+			const bool ok = SetFromEpsgCode(epsgCode);
+			if (ok)
+			{
+				return true;
+			}
+		}
+
+		GBLOG_WARNING(GB_STR("【GeoCrs::SetFromUserInput】SetFromUserInput失败: err=") + std::to_string(static_cast<int>(err)) + GB_STR(", definition=") + trimmed);
 		ResetNoLock();
 		return false;
 	}

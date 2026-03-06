@@ -18,6 +18,12 @@ struct WmsParserOptions
 
 MAPWEAVERCORE_PORT bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, const std::string& baseUrl, WmsCapabilitiesProperty& outCapabilities, const WmsParserOptions& options = WmsParserOptions());
 
+struct BuildLayerTreeOptions
+{
+	std::string defaultImageFormat = "image/png";
+	bool ignoreUniqueChildNode = true;
+};
+
 struct WmsTreeNode
 {
 	enum class NodeType
@@ -32,9 +38,12 @@ struct WmsTreeNode
 	NodeType nodeType = NodeType::Unknown;
 	std::string textUtf8 = "";
 	std::vector<WmsTreeNode> children;
+	std::string uidUtf8 = "";
+
+	MAPWEAVERCORE_PORT std::string ToString(const std::string& indentStringUtf8 = "----") const;
 };
 
-MAPWEAVERCORE_PORT bool BuildWmsLayerTree(const WmsCapabilitiesProperty& capabilities, std::vector<WmsTreeNode>& outLayerTree);
+MAPWEAVERCORE_PORT bool BuildWmsLayerTree(const WmsCapabilitiesProperty& capabilities, WmsTreeNode& rootNode, const BuildLayerTreeOptions& options = BuildLayerTreeOptions());
 
 
 #endif
