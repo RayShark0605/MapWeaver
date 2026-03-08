@@ -52,31 +52,37 @@ bool IsUrlForWMTS(const std::string& urlUtf8)
 	return false;
 }
 
-static std::string ConvertRawBytesToUtf8(const std::string& rawBytes)
+static inline std::string ConvertRawBytesToUtf8(const std::string& rawBytes)
 {
 	try
 	{
-		const int64_t startPos = GB_Utf8Find(rawBytes, GB_STR("encoding=\""), false);
+		const int64_t startPos = GB_Utf8Find(rawBytes, GB_STR("encoding"), false);
 		if (startPos < 0)
 		{
 			GBLOG_WARNING("Failed to find encoding declaration in XML. Defaulting to UTF-8.");
 			return rawBytes;
 		}
-		const int64_t startEncodingPos = startPos + 10;
-		for (int64_t pos = startEncodingPos; pos <= startEncodingPos + 20; pos++)
-		{
-			if (GB_GetUtf8Char(rawBytes, pos) == GB_CHAR('\"'))
-			{
-				const std::string encoding = GB_Utf8Substr(rawBytes, startEncodingPos, pos - startEncodingPos);
-				if (GB_Utf8Equals(encoding, GB_STR("utf-8"), false) || GB_Utf8Equals(encoding, GB_STR("utf8"), false))
-				{
-					return rawBytes;
-				}
 
-				return GB_BytesToUtf8(rawBytes, encoding);
-			}
+		const int64_t firstPos = GB_Utf8Find(rawBytes, GB_STR("\""), false, startPos + 8);
+		if (firstPos < 0 || firstPos - startPos > 20)
+		{
+			GBLOG_WARNING("Failed to find opening quote for encoding declaration in XML. Defaulting to UTF-8.");
+			return rawBytes;
 		}
-		return rawBytes;
+
+		const int64_t secondPos = GB_Utf8Find(rawBytes, GB_STR("\""), false, firstPos + 1);
+		if (secondPos < 0 || secondPos - firstPos > 30)
+		{
+			GBLOG_WARNING("Failed to find closing quote for encoding declaration in XML. Defaulting to UTF-8.");
+			return rawBytes;
+		}
+
+		const std::string encoding = GB_Utf8Substr(rawBytes, firstPos + 1, secondPos - firstPos - 1);
+		if (GB_Utf8Equals(encoding, GB_STR("utf-8"), false) || GB_Utf8Equals(encoding, GB_STR("utf8"), false))
+		{
+			return rawBytes;
+		}
+		return GB_BytesToUtf8(rawBytes, encoding);
 	}
 	catch (const std::exception& ex)
 	{
@@ -95,14 +101,17 @@ bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapa
 		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, GB_STR("REQUEST"), GB_STR("GetCapabilities"));
 	}
 
-	GB_NetworkResponse response = GB_RequestUrlData(urlUtf8, options);
-	if (response.ok)
+	GB_NetworkResponse response;
+	for (int i = 0; i < 2; i++)
 	{
-		const std::string rawString = response.body;
-		outCapabilitiesXmlUtf8 = ConvertRawBytesToUtf8(rawString);
-		return true;
+		response = GB_RequestUrlData(urlUtf8, options);
+		if (response.ok)
+		{
+			const std::string rawString = response.body;
+			outCapabilitiesXmlUtf8 = ConvertRawBytesToUtf8(rawString);
+			return true;
+		}
 	}
-
 	GBLOG_WARNING(GB_Utf8Format("Failed to download WMS capabilities from URL: '%s'. HTTP status code: %ld. Error message: %s", urlUtf8.c_str(), response.httpStatusCode, response.errorMessageUtf8.c_str()));
 
 	response = GB_RequestUrlData(rawUrlUtf8, options);
@@ -2698,4 +2707,10 @@ bool BuildWmsLayerTree(const WmsCapabilitiesProperty& capabilities, WmsTreeNode&
 	});
 	return true;
 }
+
+
+
+
+
+
 

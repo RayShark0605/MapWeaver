@@ -12,7 +12,7 @@ int main(int argc, char* argv[])
 	GB_SetConsoleEncodingToUtf8();
 	GB_SetLogToConsole(true);
 
-	const std::string baseUrl = GB_STR("https://kaart.maaamet.ee/wms/alus?version=1.3.0");
+	const std::string baseUrl = GB_STR("https://ovc.catastro.meh.es/Cartografia/WMS/ServidorWMS.aspx?SERVICE=WMS&REQUEST=GETCAPABILITIES");
 
 	std::string capabilitiesXmlUtf8 = "";
 	if (!DownloadWmsCapabilities(baseUrl, capabilitiesXmlUtf8) || capabilitiesXmlUtf8.empty())

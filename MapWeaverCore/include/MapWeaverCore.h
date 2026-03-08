@@ -20,7 +20,6 @@ MAPWEAVERCORE_PORT bool ParseWmsCapabilities(const std::string& capabilitiesXmlU
 
 struct BuildLayerTreeOptions
 {
-	std::string defaultImageFormat = "image/png";
 	bool ignoreUniqueChildNode = true;
 };
 
@@ -44,6 +43,44 @@ struct WmsTreeNode
 };
 
 MAPWEAVERCORE_PORT bool BuildWmsLayerTree(const WmsCapabilitiesProperty& capabilities, WmsTreeNode& rootNode, const BuildLayerTreeOptions& options = BuildLayerTreeOptions());
+
+struct MapRequestItem
+{
+	std::string urlUtf8 = "";
+	GeoBoundingBox boundingBox;
+	int zoomLevel = -1;
+	size_t rowIndex = 0, colIndex = 0;
+	std::string uidUtf8 = "";
+};
+
+struct BuildVisibleMapRequestItemsInput
+{
+	MapTileMode mapType;
+	const WmsCapabilitiesProperty* capabilities = nullptr;
+	std::string mapServiceUrlUtf8 = "";
+	std::string layerIdentifierUtf8 = "";
+	std::string styleUtf8 = "";
+	std::string tileMatrixSetUtf8 = "";
+	std::string formatUtf8 = "";
+	int minZoomLevel = -1;
+	int maxZoomLevel = -1;
+
+	
+
+
+
+
+};
+
+MAPWEAVERCORE_PORT std::vector<MapRequestItem> BuildVisibleMapRequestItems(MapTileMode mapType, const WmsCapabilitiesProperty* capabilities, const GeoBoundingBox& viewportBBox, );
+
+
+
+
+
+
+
+
 
 
 #endif
