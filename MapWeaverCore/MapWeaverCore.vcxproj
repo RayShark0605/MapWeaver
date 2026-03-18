@@ -19,6 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\ArcGISMapServiceInfo.h" />
     <ClInclude Include="include\GeoBoundingBox.h" />
     <ClInclude Include="include\GeoCrs.h" />
     <ClInclude Include="include\GeoCrsManager.h" />
@@ -90,12 +91,12 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>..\GlobalBase\GlobalBase;.\include;.\3rdParty\GDAL_3.12.1\include;$(IncludePath)</IncludePath>
-    <LibraryPath>..\x64\Debug;.\3rdParty\GDAL_3.12.1\lib;$(LibraryPath)</LibraryPath>
+    <IncludePath>..\GlobalBase\GlobalBase;.\include;.\3rdParty\GDAL_3.12.2\include;$(IncludePath)</IncludePath>
+    <LibraryPath>..\x64\Debug;.\3rdParty\GDAL_3.12.2\lib\Debug;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>..\GlobalBase\GlobalBase;.\include;.\3rdParty\GDAL_3.12.1\include;$(IncludePath)</IncludePath>
-    <LibraryPath>..\x64\Release;.\3rdParty\GDAL_3.12.1\lib;$(LibraryPath)</LibraryPath>
+    <IncludePath>..\GlobalBase\GlobalBase;.\include;.\3rdParty\GDAL_3.12.2\include;$(IncludePath)</IncludePath>
+    <LibraryPath>..\x64\Release;.\3rdParty\GDAL_3.12.2\lib\Release;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg">
     <VcpkgEnabled>false</VcpkgEnabled>
@@ -139,7 +140,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;MAPWEAVERCORE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;MAPWEAVERCORE_EXPORTS;GLOBALBASE_STATIC;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>
@@ -151,7 +152,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>GlobalBase.lib;gdal_i.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>GlobalBased.lib;gdald.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -160,19 +161,20 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;MAPWEAVERCORE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;MAPWEAVERCORE_EXPORTS;GLOBALBASE_STATIC;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>
       </PrecompiledHeaderFile>
       <LanguageStandard>stdcpp14</LanguageStandard>
       <OpenMPSupport>true</OpenMPSupport>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalDependencies>GlobalBase.lib;gdal_i.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>GlobalBase.lib;gdal.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

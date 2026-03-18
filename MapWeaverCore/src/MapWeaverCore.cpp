@@ -8,8 +8,11 @@
 #include "cpl_minixml.h"
 #include "cpl_error.h"
 #include "cpl_string.h"
+#include "cpl_json.h"
 
 #include "GB_Crypto.h"
+#include <regex>
+#include <ogr_core.h>
 
 constexpr static double tiandituRenderingPixelSize = 0.0254 / 96;	// 天地图：0.0254 米（1 英寸）除以 96 像素（常见屏幕分辨率）
 constexpr static double standardRenderingPixelSize = 0.00028;		// 标准：0.28 毫米（0.00028 米）
@@ -91,7 +94,6 @@ static inline std::string ConvertRawBytesToUtf8(const std::string& rawBytes)
 	}
 }
 
-
 bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapabilitiesXmlUtf8, const GB_NetworkRequestOptions& options)
 {
 	std::string urlUtf8 = rawUrlUtf8;
@@ -107,7 +109,7 @@ bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapa
 		response = GB_RequestUrlData(urlUtf8, options);
 		if (response.ok)
 		{
-			const std::string rawString = response.body;
+			const std::string& rawString = response.body;
 			outCapabilitiesXmlUtf8 = ConvertRawBytesToUtf8(rawString);
 			return true;
 		}
@@ -123,6 +125,760 @@ bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapa
 	}
 
 	GBLOG_WARNING(GB_Utf8Format("Failed to download WMS capabilities from original URL: '%s'. HTTP status code: %ld. Error message: %s", rawUrlUtf8.c_str(), response.httpStatusCode, response.errorMessageUtf8.c_str()));
+
+	return false;
+}
+
+namespace
+{
+	static std::string Trim(const std::string& text)
+	{
+		size_t beginIndex = 0;
+		while (beginIndex < text.size() && std::isspace(static_cast<unsigned char>(text[beginIndex])))
+		{
+			beginIndex++;
+		}
+
+		size_t endIndex = text.size();
+		while (endIndex > beginIndex && std::isspace(static_cast<unsigned char>(text[endIndex - 1])))
+		{
+			endIndex--;
+		}
+
+		return text.substr(beginIndex, endIndex - beginIndex);
+	}
+
+	static inline std::string ToLowerAscii(const std::string& text)
+	{
+		std::string lowerText = text;
+		std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), [](unsigned char character) -> char
+		{
+			return static_cast<char>(std::tolower(character));
+		});
+		return lowerText;
+	}
+
+	static std::vector<std::string> SplitCommaSeparated(const std::string& text)
+	{
+		std::vector<std::string> values;
+		std::stringstream stream(text);
+		std::string item;
+		while (std::getline(stream, item, ','))
+		{
+			const std::string trimmedItem = Trim(item);
+			if (!trimmedItem.empty())
+			{
+				values.push_back(trimmedItem);
+			}
+		}
+		return values;
+	}
+
+	static inline bool ParseInt64(const std::string& text, long long* value)
+	{
+		if (!value)
+		{
+			return false;
+		}
+
+		const std::string trimmedText = Trim(text);
+		if (trimmedText.empty())
+		{
+			return false;
+		}
+
+		errno = 0;
+		char* endPointer = nullptr;
+		const long long parsedValue = std::strtoll(trimmedText.c_str(), &endPointer, 10);
+		if (ERANGE == errno || nullptr == endPointer || '\0' != *endPointer)
+		{
+			return false;
+		}
+
+		*value = parsedValue;
+		return true;
+	}
+
+	static inline bool ParseDouble(const std::string& text, double* value)
+	{
+		if (!value)
+		{
+			return false;
+		}
+
+		const std::string trimmedText = Trim(text);
+		if (trimmedText.empty())
+		{
+			return false;
+		}
+
+		errno = 0;
+		char* endPointer = nullptr;
+		const double parsedValue = std::strtod(trimmedText.c_str(), &endPointer);
+		if (ERANGE == errno || nullptr == endPointer || '\0' != *endPointer)
+		{
+			return false;
+		}
+
+		*value = parsedValue;
+		return true;
+	}
+
+	static inline bool HasUsableValue(const CPLJSONObject& jsonValue)
+	{
+		if (!jsonValue.IsValid())
+		{
+			return false;
+		}
+
+		const CPLJSONObject::Type valueType = jsonValue.GetType();
+		return CPLJSONObject::Type::Unknown != valueType && CPLJSONObject::Type::Null != valueType;
+	}
+
+	static inline bool TryGetChild(const CPLJSONObject& jsonObject, const std::string& key, CPLJSONObject* childValue)
+	{
+		if (!childValue)
+		{
+			return false;
+		}
+
+		const CPLJSONObject value = jsonObject[key];
+		if (!HasUsableValue(value))
+		{
+			return false;
+		}
+
+		*childValue = value;
+		return true;
+	}
+
+	static inline bool TryGetString(const CPLJSONObject& jsonValue, std::string* text)
+	{
+		if (!text || !HasUsableValue(jsonValue))
+		{
+			return false;
+		}
+
+		const CPLJSONObject::Type valueType = jsonValue.GetType();
+		switch (valueType)
+		{
+		case CPLJSONObject::Type::String:
+		case CPLJSONObject::Type::Integer:
+		case CPLJSONObject::Type::Long:
+		case CPLJSONObject::Type::Double:
+		case CPLJSONObject::Type::Boolean:
+			*text = jsonValue.ToString();
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	static inline bool TryGetInt(const CPLJSONObject& jsonValue, int* integerValue)
+	{
+		if (!integerValue || !HasUsableValue(jsonValue))
+		{
+			return false;
+		}
+
+		const CPLJSONObject::Type valueType = jsonValue.GetType();
+		switch (valueType)
+		{
+		case CPLJSONObject::Type::Integer:
+		case CPLJSONObject::Type::Long:
+		{
+			const long long value = jsonValue.ToLong();
+			if (value < static_cast<long long>(std::numeric_limits<int>::min()) ||
+				value > static_cast<long long>(std::numeric_limits<int>::max()))
+			{
+				return false;
+			}
+
+			*integerValue = static_cast<int>(value);
+			return true;
+		}
+
+		case CPLJSONObject::Type::String:
+		{
+			long long value = 0;
+			if (!ParseInt64(jsonValue.ToString(), &value))
+			{
+				return false;
+			}
+
+			if (value < static_cast<long long>(std::numeric_limits<int>::min()) ||
+				value > static_cast<long long>(std::numeric_limits<int>::max()))
+			{
+				return false;
+			}
+
+			*integerValue = static_cast<int>(value);
+			return true;
+		}
+
+		default:
+			return false;
+		}
+	}
+
+	static inline bool TryGetDouble(const CPLJSONObject& jsonValue, double* doubleValue)
+	{
+		if (!doubleValue || !HasUsableValue(jsonValue))
+		{
+			return false;
+		}
+
+		const CPLJSONObject::Type valueType = jsonValue.GetType();
+		switch (valueType)
+		{
+		case CPLJSONObject::Type::Integer:
+		case CPLJSONObject::Type::Long:
+		case CPLJSONObject::Type::Double:
+			*doubleValue = jsonValue.ToDouble();
+			return true;
+
+		case CPLJSONObject::Type::String:
+			return ParseDouble(jsonValue.ToString(), doubleValue);
+
+		default:
+			return false;
+		}
+	}
+
+	static inline bool TryGetBool(const CPLJSONObject& jsonValue, bool* boolValue)
+	{
+		if (!boolValue || !HasUsableValue(jsonValue))
+		{
+			return false;
+		}
+
+		const CPLJSONObject::Type valueType = jsonValue.GetType();
+		switch (valueType)
+		{
+		case CPLJSONObject::Type::Boolean:
+			*boolValue = jsonValue.ToBool();
+			return true;
+
+		case CPLJSONObject::Type::Integer:
+		case CPLJSONObject::Type::Long:
+		{
+			const long long value = jsonValue.ToLong();
+			if (0 == value)
+			{
+				*boolValue = false;
+				return true;
+			}
+			if (1 == value)
+			{
+				*boolValue = true;
+				return true;
+			}
+			return false;
+		}
+
+		case CPLJSONObject::Type::String:
+		{
+			const std::string lowerText = ToLowerAscii(Trim(jsonValue.ToString()));
+			if ("true" == lowerText || "1" == lowerText)
+			{
+				*boolValue = true;
+				return true;
+			}
+			if ("false" == lowerText || "0" == lowerText)
+			{
+				*boolValue = false;
+				return true;
+			}
+			return false;
+		}
+
+		default:
+			return false;
+		}
+	}
+
+	static inline bool TryGetMemberString(const CPLJSONObject& jsonObject, const std::string& key, std::string* text)
+	{
+		CPLJSONObject childValue;
+		if (!TryGetChild(jsonObject, key, &childValue))
+		{
+			return false;
+		}
+
+		return TryGetString(childValue, text);
+	}
+
+	static inline bool TryGetMemberInt(const CPLJSONObject& jsonObject, const std::string& key, int* integerValue)
+	{
+		CPLJSONObject childValue;
+		if (!TryGetChild(jsonObject, key, &childValue))
+		{
+			return false;
+		}
+
+		return TryGetInt(childValue, integerValue);
+	}
+
+	static inline bool TryGetMemberDouble(const CPLJSONObject& jsonObject, const std::string& key, double* doubleValue)
+	{
+		CPLJSONObject childValue;
+		if (!TryGetChild(jsonObject, key, &childValue))
+		{
+			return false;
+		}
+
+		return TryGetDouble(childValue, doubleValue);
+	}
+
+	static inline bool TryGetMemberBool(const CPLJSONObject& jsonObject, const std::string& key, bool* boolValue)
+	{
+		CPLJSONObject childValue;
+		if (!TryGetChild(jsonObject, key, &childValue))
+		{
+			return false;
+		}
+
+		return TryGetBool(childValue, boolValue);
+	}
+
+	static inline bool ParseSpatialReference(const CPLJSONObject& jsonObject, ArcGISSpatialReference* spatialReference)
+	{
+		if (!spatialReference || !HasUsableValue(jsonObject) || CPLJSONObject::Type::Object != jsonObject.GetType())
+		{
+			return false;
+		}
+
+		ArcGISSpatialReference parsedSpatialReference;
+		bool hasAnyField = false;
+
+		if (TryGetMemberInt(jsonObject, "wkid", &parsedSpatialReference.m_wkid))
+		{
+			hasAnyField = true;
+		}
+
+		if (TryGetMemberInt(jsonObject, "latestWkid", &parsedSpatialReference.m_latestWkid))
+		{
+			hasAnyField = true;
+		}
+
+		if (TryGetMemberString(jsonObject, "wkt", &parsedSpatialReference.m_wkt))
+		{
+			hasAnyField = true;
+		}
+
+		if (!hasAnyField)
+		{
+			return false;
+		}
+
+		*spatialReference = parsedSpatialReference;
+		return true;
+	}
+
+	static inline bool ParseExtent(const CPLJSONObject& jsonObject, ArcGISExtent* extent)
+	{
+		if (!extent || !HasUsableValue(jsonObject) || CPLJSONObject::Type::Object != jsonObject.GetType())
+		{
+			return false;
+		}
+
+		ArcGISExtent parsedExtent;
+
+		const bool hasXmin = TryGetMemberDouble(jsonObject, "xmin", &parsedExtent.m_xmin);
+		const bool hasYmin = TryGetMemberDouble(jsonObject, "ymin", &parsedExtent.m_ymin);
+		const bool hasXmax = TryGetMemberDouble(jsonObject, "xmax", &parsedExtent.m_xmax);
+		const bool hasYmax = TryGetMemberDouble(jsonObject, "ymax", &parsedExtent.m_ymax);
+
+		parsedExtent.m_isValid = hasXmin && hasYmin && hasXmax && hasYmax;
+
+		CPLJSONObject spatialReferenceValue;
+		if (TryGetChild(jsonObject, "spatialReference", &spatialReferenceValue))
+		{
+			ParseSpatialReference(spatialReferenceValue, &parsedExtent.m_spatialReference);
+		}
+
+		*extent = parsedExtent;
+		return true;
+	}
+
+	static inline bool ParseLayerInfo(const CPLJSONObject& jsonObject, ArcGISLayerInfo* layerInfo)
+	{
+		if (!layerInfo || !HasUsableValue(jsonObject) || CPLJSONObject::Type::Object != jsonObject.GetType())
+		{
+			return false;
+		}
+
+		ArcGISLayerInfo parsedLayerInfo;
+
+		TryGetMemberInt(jsonObject, "id", &parsedLayerInfo.m_id);
+		TryGetMemberString(jsonObject, "name", &parsedLayerInfo.m_name);
+		TryGetMemberInt(jsonObject, "parentLayerId", &parsedLayerInfo.m_parentLayerId);
+		TryGetMemberBool(jsonObject, "defaultVisibility", &parsedLayerInfo.m_defaultVisibility);
+		TryGetMemberDouble(jsonObject, "minScale", &parsedLayerInfo.m_minScale);
+		TryGetMemberDouble(jsonObject, "maxScale", &parsedLayerInfo.m_maxScale);
+
+		CPLJSONObject subLayerIdsValue;
+		if (TryGetChild(jsonObject, "subLayerIds", &subLayerIdsValue) && CPLJSONObject::Type::Array == subLayerIdsValue.GetType())
+		{
+			const CPLJSONArray subLayerIdsArray = subLayerIdsValue.ToArray();
+			parsedLayerInfo.m_subLayerIds.reserve(subLayerIdsArray.Size());
+
+			for (int i = 0; i < subLayerIdsArray.Size(); i++)
+			{
+				const CPLJSONObject subLayerIdValue = subLayerIdsArray[i];
+				int subLayerId = -1;
+				if (TryGetInt(subLayerIdValue, &subLayerId))
+				{
+					parsedLayerInfo.m_subLayerIds.push_back(subLayerId);
+				}
+			}
+		}
+
+		*layerInfo = parsedLayerInfo;
+		return true;
+	}
+
+	static void ParseLayerInfoArray(const CPLJSONObject& jsonValue, std::vector<ArcGISLayerInfo>* layerInfos)
+	{
+		if (!layerInfos)
+		{
+			return;
+		}
+
+		layerInfos->clear();
+
+		if (!HasUsableValue(jsonValue) || CPLJSONObject::Type::Array != jsonValue.GetType())
+		{
+			return;
+		}
+
+		const CPLJSONArray jsonArray = jsonValue.ToArray();
+		layerInfos->reserve(jsonArray.Size());
+
+		for (int i = 0; i < jsonArray.Size(); i++)
+		{
+			ArcGISLayerInfo layerInfo;
+			if (ParseLayerInfo(jsonArray[i], &layerInfo))
+			{
+				layerInfos->push_back(layerInfo);
+			}
+		}
+	}
+
+	static inline bool ParseLodInfo(const CPLJSONObject& jsonObject, ArcGISLodInfo* lodInfo)
+	{
+		if (!lodInfo || !HasUsableValue(jsonObject) || CPLJSONObject::Type::Object != jsonObject.GetType())
+		{
+			return false;
+		}
+
+		ArcGISLodInfo parsedLodInfo;
+		TryGetMemberInt(jsonObject, "level", &parsedLodInfo.m_level);
+		TryGetMemberDouble(jsonObject, "resolution", &parsedLodInfo.m_resolution);
+		TryGetMemberDouble(jsonObject, "scale", &parsedLodInfo.m_scale);
+
+		*lodInfo = parsedLodInfo;
+		return true;
+	}
+
+	static bool ParseTileInfo(const CPLJSONObject& jsonObject, ArcGISTileInfo* tileInfo)
+	{
+		if (!tileInfo || !HasUsableValue(jsonObject) || CPLJSONObject::Type::Object != jsonObject.GetType())
+		{
+			return false;
+		}
+
+		ArcGISTileInfo parsedTileInfo;
+
+		TryGetMemberInt(jsonObject, "rows", &parsedTileInfo.m_rows);
+		TryGetMemberInt(jsonObject, "cols", &parsedTileInfo.m_cols);
+		TryGetMemberInt(jsonObject, "dpi", &parsedTileInfo.m_dpi);
+		TryGetMemberString(jsonObject, "format", &parsedTileInfo.m_format);
+		TryGetMemberInt(jsonObject, "compressionQuality", &parsedTileInfo.m_compressionQuality);
+
+		CPLJSONObject originValue;
+		if (TryGetChild(jsonObject, "origin", &originValue) && CPLJSONObject::Type::Object == originValue.GetType())
+		{
+			TryGetMemberDouble(originValue, "x", &parsedTileInfo.m_origin.x);
+			TryGetMemberDouble(originValue, "y", &parsedTileInfo.m_origin.y);
+		}
+
+		CPLJSONObject spatialReferenceValue;
+		if (TryGetChild(jsonObject, "spatialReference", &spatialReferenceValue))
+		{
+			ParseSpatialReference(spatialReferenceValue, &parsedTileInfo.m_spatialReference);
+		}
+
+		CPLJSONObject lodsValue;
+		if (TryGetChild(jsonObject, "lods", &lodsValue) && CPLJSONObject::Type::Array == lodsValue.GetType())
+		{
+			const CPLJSONArray lodsArray = lodsValue.ToArray();
+			parsedTileInfo.m_lods.reserve(lodsArray.Size());
+
+			for (int i = 0; i < lodsArray.Size(); i++)
+			{
+				ArcGISLodInfo lodInfo;
+				if (ParseLodInfo(lodsArray[i], &lodInfo))
+				{
+					parsedTileInfo.m_lods.push_back(lodInfo);
+				}
+			}
+		}
+
+		*tileInfo = parsedTileInfo;
+		return true;
+	}
+
+	static inline void ParseDocumentInfo(const CPLJSONObject& jsonObject, ArcGISDocumentInfo* documentInfo)
+	{
+		if (!documentInfo)
+		{
+			return;
+		}
+
+		ArcGISDocumentInfo parsedDocumentInfo;
+
+		if (HasUsableValue(jsonObject) && CPLJSONObject::Type::Object == jsonObject.GetType())
+		{
+			TryGetMemberString(jsonObject, "Title", &parsedDocumentInfo.m_title);
+			TryGetMemberString(jsonObject, "Author", &parsedDocumentInfo.m_author);
+			TryGetMemberString(jsonObject, "Comments", &parsedDocumentInfo.m_comments);
+			TryGetMemberString(jsonObject, "Subject", &parsedDocumentInfo.m_subject);
+			TryGetMemberString(jsonObject, "Category", &parsedDocumentInfo.m_category);
+			TryGetMemberString(jsonObject, "AntialiasingMode", &parsedDocumentInfo.m_antialiasingMode);
+			TryGetMemberString(jsonObject, "TextAntialiasingMode", &parsedDocumentInfo.m_textAntialiasingMode);
+			TryGetMemberString(jsonObject, "Keywords", &parsedDocumentInfo.m_keywords);
+		}
+
+		*documentInfo = parsedDocumentInfo;
+	}
+
+	static void PrintJsonParseDebugInfo(const std::string& jsonText)
+	{
+		std::cout << "GDALVersion = " << GDALVersionInfo("RELEASE_NAME") << std::endl;
+		std::cout << "JsonSize = " << jsonText.size() << std::endl;
+
+		const size_t previewLength = std::min<size_t>(jsonText.size(), 128);
+		std::cout << "JsonPreview = [" << jsonText.substr(0, previewLength) << "]" << std::endl;
+
+		std::cout << "JsonHexPreview = ";
+		for (size_t i = 0; i < previewLength; i++)
+		{
+			const unsigned char byteValue = static_cast<unsigned char>(jsonText[i]);
+			std::printf("%02X ", byteValue);
+		}
+		std::printf("\n");
+
+		CPLErrorReset();
+
+		CPLJSONDocument jsonDocument;
+		const bool loadSucceeded =
+			jsonDocument.LoadMemory(reinterpret_cast<const GByte*>(jsonText.data()),
+				static_cast<int>(jsonText.size()));
+
+		std::cout << "LoadSucceeded = " << loadSucceeded << std::endl;
+		std::cout << "LastErrorType = " << static_cast<int>(CPLGetLastErrorType()) << std::endl;
+		std::cout << "LastErrorNo = " << static_cast<int>(CPLGetLastErrorNo()) << std::endl;
+		std::cout << "LastErrorMsg = [" << CPLGetLastErrorMsg() << "]" << std::endl;
+	}
+
+	static bool ParseArcGISMapServerJson(const std::string& jsonText, ArcGISMapServiceInfo* mapServiceInfo, std::string* errorMessage)
+	{
+		if (!errorMessage)
+		{
+			return false;
+		}
+		errorMessage->clear();
+
+		if (!mapServiceInfo)
+		{
+			*errorMessage = "mapServiceInfo is null.";
+			return false;
+		}
+		*mapServiceInfo = ArcGISMapServiceInfo();
+		if (jsonText.empty())
+		{
+			*errorMessage = "jsonText is empty.";
+			return false;
+		}
+
+		CPLErrorReset();
+		CPLJSONDocument jsonDocument;
+		if (!jsonDocument.LoadMemory(jsonText))
+		//if (!jsonDocument.LoadMemory(reinterpret_cast<const GByte*>(jsonText.data()), static_cast<int>(jsonText.size())))
+		{
+			const char* lastErrorMessage = CPLGetLastErrorMsg();
+			*errorMessage = (nullptr != lastErrorMessage && '\0' != lastErrorMessage[0]) ? lastErrorMessage : "GDAL failed to parse json text.";
+			return false;
+		}
+
+		const CPLJSONObject rootObject = jsonDocument.GetRoot();
+		if (!HasUsableValue(rootObject) || CPLJSONObject::Type::Object != rootObject.GetType())
+		{
+			*errorMessage = "Root JSON value is not an object.";
+			return false;
+		}
+		
+		ArcGISMapServiceInfo parsedInfo;
+		TryGetMemberString(rootObject, "currentVersion", &parsedInfo.m_currentVersion);
+		TryGetMemberString(rootObject, "serviceDescription", &parsedInfo.m_serviceDescription);
+		TryGetMemberString(rootObject, "mapName", &parsedInfo.m_mapName);
+		TryGetMemberString(rootObject, "description", &parsedInfo.m_description);
+		TryGetMemberString(rootObject, "copyrightText", &parsedInfo.m_copyrightText);
+		TryGetMemberBool(rootObject, "supportsDynamicLayers", &parsedInfo.m_supportsDynamicLayers);
+		
+		CPLJSONObject layersValue;
+		if (TryGetChild(rootObject, "layers", &layersValue))
+		{
+			ParseLayerInfoArray(layersValue, &parsedInfo.m_layers);
+		}
+		
+		CPLJSONObject tablesValue;
+		if (TryGetChild(rootObject, "tables", &tablesValue))
+		{
+			ParseLayerInfoArray(tablesValue, &parsedInfo.m_tables);
+		}
+		
+		CPLJSONObject spatialReferenceValue;
+		if (TryGetChild(rootObject, "spatialReference", &spatialReferenceValue))
+		{
+			parsedInfo.m_hasSpatialReference = ParseSpatialReference(spatialReferenceValue, &parsedInfo.m_spatialReference);
+		}
+		
+		TryGetMemberBool(rootObject, "singleFusedMapCache", &parsedInfo.m_singleFusedMapCache);
+		
+		CPLJSONObject tileInfoValue;
+		if (TryGetChild(rootObject, "tileInfo", &tileInfoValue))
+		{
+			parsedInfo.m_hasTileInfo = ParseTileInfo(tileInfoValue, &parsedInfo.m_tileInfo);
+		}
+		
+		CPLJSONObject initialExtentValue;
+		if (TryGetChild(rootObject, "initialExtent", &initialExtentValue))
+		{
+			parsedInfo.m_hasInitialExtent = ParseExtent(initialExtentValue, &parsedInfo.m_initialExtent);
+		}
+		
+		CPLJSONObject fullExtentValue;
+		if (TryGetChild(rootObject, "fullExtent", &fullExtentValue))
+		{
+			parsedInfo.m_hasFullExtent = ParseExtent(fullExtentValue, &parsedInfo.m_fullExtent);
+		}
+		
+		TryGetMemberDouble(rootObject, "minScale", &parsedInfo.m_minScale);
+		TryGetMemberDouble(rootObject, "maxScale", &parsedInfo.m_maxScale);
+		TryGetMemberString(rootObject, "units", &parsedInfo.m_units);
+		
+		std::string supportedImageFormatTypesText;
+		if (TryGetMemberString(rootObject, "supportedImageFormatTypes", &supportedImageFormatTypesText))
+		{
+			parsedInfo.m_supportedImageFormatTypes = SplitCommaSeparated(supportedImageFormatTypesText);
+		}
+		
+		CPLJSONObject documentInfoValue;
+		if (TryGetChild(rootObject, "documentInfo", &documentInfoValue))
+		{
+			ParseDocumentInfo(documentInfoValue, &parsedInfo.m_documentInfo);
+		}
+		
+		std::string capabilitiesText;
+		if (TryGetMemberString(rootObject, "capabilities", &capabilitiesText))
+		{
+			parsedInfo.m_capabilities = SplitCommaSeparated(capabilitiesText);
+		}
+		
+		std::string supportedQueryFormatsText;
+		if (TryGetMemberString(rootObject, "supportedQueryFormats", &supportedQueryFormatsText))
+		{
+			parsedInfo.m_supportedQueryFormats = SplitCommaSeparated(supportedQueryFormatsText);
+		}
+		
+		TryGetMemberBool(rootObject, "exportTilesAllowed", &parsedInfo.m_exportTilesAllowed);
+		TryGetMemberInt(rootObject, "maxRecordCount", &parsedInfo.m_maxRecordCount);
+		TryGetMemberInt(rootObject, "maxImageHeight", &parsedInfo.m_maxImageHeight);
+		TryGetMemberInt(rootObject, "maxImageWidth", &parsedInfo.m_maxImageWidth);
+		
+		std::string supportedExtensionsText;
+		if (TryGetMemberString(rootObject, "supportedExtensions", &supportedExtensionsText))
+		{
+			parsedInfo.m_supportedExtensions = SplitCommaSeparated(supportedExtensionsText);
+		}
+		
+		*mapServiceInfo = parsedInfo;
+		return true;
+	}
+}
+
+bool RequestArcGISServerJson(const std::string& urlUtf8, ArcGISMapServiceInfo& mapServiceInfo, const GB_NetworkRequestOptions& options)
+{
+	const static std::vector<std::string> knownArcGISServerFeatureCodes = {
+		"/FeatureServer",
+		"/ImageServer",
+		"/MapServer",
+		"/SceneServer",
+		"/VectorTileServer"
+	};
+
+	GB_NetworkResponse response;
+	for (const std::string& featureCode : knownArcGISServerFeatureCodes)
+	{
+		const int64_t index = GB_Utf8FindLast(urlUtf8, featureCode, false);
+		if (index <= 0)
+		{
+			continue;
+		}
+		const std::string pjsonUrl = urlUtf8.substr(0, index + featureCode.size()) + "?f=pjson";
+		response = GB_RequestUrlData(pjsonUrl, options);
+		if (!response.ok)
+		{
+			response = GB_NetworkResponse();
+			continue;
+		}
+		break;
+	}
+	if (!response.ok)
+	{
+		return false;
+	}
+
+	const std::string& jsonText = response.body;
+	std::string errorMessage = "";
+	return ParseArcGISMapServerJson(jsonText, &mapServiceInfo, &errorMessage);
+}
+
+bool RequestArcGISServerVersion(const std::string& urlUtf8, std::string& outVersionUtf8, const GB_NetworkRequestOptions& options)
+{
+	const static std::vector<std::string> knownArcGISServerFeatureCodes = {
+		"/FeatureServer",
+		"/ImageServer",
+		"/MapServer",
+		"/SceneServer",
+		"/VectorTileServer"
+	};
+
+	for (const std::string& featureCode : knownArcGISServerFeatureCodes)
+	{
+		const int64_t index = GB_Utf8FindLast(urlUtf8, featureCode, false);
+		if (index <= 0)
+		{
+			continue;
+		}
+		const std::string pjsonUrl = urlUtf8.substr(0, index + featureCode.size()) + "?f=pjson";
+		const GB_NetworkResponse response = GB_RequestUrlData(pjsonUrl, options);
+		if (response.ok)
+		{
+			const std::string& content = response.body;
+			static const std::regex currentVersionRegex(
+				R"("currentVersion"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+\-]?\d+)?))"
+			);
+			std::smatch matchResult;
+			if (std::regex_search(content, matchResult, currentVersionRegex) && matchResult.size() >= 2)
+			{
+				outVersionUtf8 = matchResult[1].str();
+				return true;
+			}
+		}
+	}
 
 	return false;
 }

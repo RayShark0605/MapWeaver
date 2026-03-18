@@ -39,6 +39,9 @@
     <ClInclude Include="include\MapWeaverCore.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\ArcGISMapServiceInfo.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\GeoBoundingBox.cpp">

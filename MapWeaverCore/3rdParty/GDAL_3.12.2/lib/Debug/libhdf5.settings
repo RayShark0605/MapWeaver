@@ -1,0 +1,94 @@
+        SUMMARY OF THE HDF5 CONFIGURATION
+        =================================
+
+General Information:
+-------------------
+                   HDF5 Version: 2.0.0
+                  Configured on: 2026-03-17
+                  Configured by: Ninja
+                    Host system: Windows-10.0.26300
+              Uname information: Windows
+                       Byte sex: little-endian
+             Installation point: D:/Code/vcpkg/packages/hdf5_x64-windows/debug
+
+Compiling Options:
+------------------
+                     Build Mode: Debug
+              Debugging Symbols: OFF
+                        Asserts: OFF
+                      Profiling: OFF
+             Optimization Level: OFF
+
+Linking Options:
+----------------
+                      Libraries: 
+  Statically Linked Executables: OFF
+                        LDFLAGS: /machine:x64
+                     H5_LDFLAGS: 
+                     AM_LDFLAGS: 
+                Extra libraries: Threads::Threads
+                       Archiver: D:/VisualStudio2022/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lib.exe
+                       AR_FLAGS:
+                         Ranlib: :
+
+Languages:
+----------
+                              C: YES
+                     C Compiler: D:/VisualStudio2022/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe 19.44.35222.0
+                       CPPFLAGS: 
+                    H5_CPPFLAGS: 
+                    AM_CPPFLAGS: 
+                         CFLAGS:  -std:c11  /nologo /DWIN32 /D_WINDOWS /utf-8 /MP  -wd5105 /MDd /Z7 /Ob0 /Od /RTC1 
+                      H5_CFLAGS: /W3;/wd4100;/wd4706;/wd4127
+                      AM_CFLAGS: 
+               Shared C Library: YES
+               Static C Library: NO
+
+                        Fortran: OFF
+               Fortran Compiler:  
+                  Fortran Flags:  
+               H5 Fortran Flags: 
+               AM Fortran Flags: 
+         Shared Fortran Library: YES
+         Static Fortran Library: NO
+               Module Directory: D:/Code/vcpkg/buildtrees/hdf5/x64-windows-dbg/mod
+
+                            C++: ON
+                   C++ Compiler: D:/VisualStudio2022/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe 19.44.35222.0
+                      C++ Flags:   /nologo /DWIN32 /D_WINDOWS /utf-8 /GR /EHsc /MP  /EHsc -wd5105 /EHsc -wd5105 /MDd /Z7 /Ob0 /Od /RTC1 
+                   H5 C++ Flags: /W3;/wd4100;/wd4706;/wd4127
+                   AM C++ Flags: 
+             Shared C++ Library: YES
+             Static C++ Library: NO
+
+                           JAVA: OFF
+                  JAVA Compiler:  
+
+Features:
+---------
+                     Parallel HDF5: OFF
+  Parallel Filtered Dataset Writes: 
+                Large Parallel I/O: 
+                High-level library: ON
+Dimension scales w/ new references: 
+                  Build HDF5 Tests: OFF
+                  Build HDF5 Tools: OFF
+                           Threads: ON
+                      Threadsafety: OFF
+                       Concurrency: OFF
+               Default API mapping: v200
+    With deprecated public symbols: ON
+            I/O filters (external):  DEFLATE DECODE ENCODE
+                  _Float16 support: OFF
+                     Map (H5M) API: OFF
+                        Direct VFD: OFF
+                        Mirror VFD: OFF
+                     Subfiling VFD: OFF
+                (Read-Only) S3 VFD: OFF
+              (Read-Only) HDFS VFD: OFF
+    Packages w/ extra debug output: 
+                       API Tracing: OFF
+              Using memory checker: OFF
+                  Use file locking: best-effort
+         Strict File Format Checks: OFF
+      Optimization Instrumentation: 

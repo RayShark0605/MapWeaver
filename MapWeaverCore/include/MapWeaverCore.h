@@ -4,11 +4,16 @@
 #include "MapWeaverPort.h"
 #include "GB_Network.h"
 #include "MapLayer.h"
+#include "ArcGISMapServiceInfo.h"
 #include <string>
 
 MAPWEAVERCORE_PORT bool IsUrlForWMTS(const std::string& urlUtf8);
 
 MAPWEAVERCORE_PORT bool DownloadWmsCapabilities(const std::string& urlUtf8, std::string& outCapabilitiesXmlUtf8, const GB_NetworkRequestOptions& options = GB_NetworkRequestOptions());
+
+MAPWEAVERCORE_PORT bool RequestArcGISServerJson(const std::string& urlUtf8, ArcGISMapServiceInfo& mapServiceInfo, const GB_NetworkRequestOptions& options = GB_NetworkRequestOptions());
+
+MAPWEAVERCORE_PORT bool RequestArcGISServerVersion(const std::string& urlUtf8, std::string& outVersionUtf8, const GB_NetworkRequestOptions& options = GB_NetworkRequestOptions());
 
 struct WmsParserOptions
 {
@@ -72,7 +77,7 @@ struct BuildVisibleMapRequestItemsInput
 
 };
 
-MAPWEAVERCORE_PORT std::vector<MapRequestItem> BuildVisibleMapRequestItems(MapTileMode mapType, const WmsCapabilitiesProperty* capabilities, const GeoBoundingBox& viewportBBox, );
+MAPWEAVERCORE_PORT std::vector<MapRequestItem> BuildVisibleMapRequestItems(MapTileMode mapType, const WmsCapabilitiesProperty* capabilities, const GeoBoundingBox& viewportBBox);
 
 
 
