@@ -17,6 +17,8 @@
 constexpr static double tiandituRenderingPixelSize = 0.0254 / 96;	// 天地图：0.0254 米（1 英寸）除以 96 像素（常见屏幕分辨率）
 constexpr static double standardRenderingPixelSize = 0.00028;		// 标准：0.28 毫米（0.00028 米）
 
+constexpr static double oldArcGISServerMetersPerUnit = 111194.8722222222405;		// ArcGIS Server 10.3 及以前的版本的“每度多少米”
+
 enum class RasterIdentifyFormat
 {
 	Unknown = 0,
@@ -846,43 +848,6 @@ bool RequestArcGISServerJson(const std::string& urlUtf8, ArcGISMapServiceInfo& m
 	return ParseArcGISMapServerJson(jsonText, &mapServiceInfo, &errorMessage);
 }
 
-bool RequestArcGISServerVersion(const std::string& urlUtf8, std::string& outVersionUtf8, const GB_NetworkRequestOptions& options)
-{
-	const static std::vector<std::string> knownArcGISServerFeatureCodes = {
-		"/FeatureServer",
-		"/ImageServer",
-		"/MapServer",
-		"/SceneServer",
-		"/VectorTileServer"
-	};
-
-	for (const std::string& featureCode : knownArcGISServerFeatureCodes)
-	{
-		const int64_t index = GB_Utf8FindLast(urlUtf8, featureCode, false);
-		if (index <= 0)
-		{
-			continue;
-		}
-		const std::string pjsonUrl = urlUtf8.substr(0, index + featureCode.size()) + "?f=pjson";
-		const GB_NetworkResponse response = GB_RequestUrlData(pjsonUrl, options);
-		if (response.ok)
-		{
-			const std::string& content = response.body;
-			static const std::regex currentVersionRegex(
-				R"("currentVersion"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+\-]?\d+)?))"
-			);
-			std::smatch matchResult;
-			if (std::regex_search(content, matchResult, currentVersionRegex) && matchResult.size() >= 2)
-			{
-				outVersionUtf8 = matchResult[1].str();
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-
 namespace
 {
 	static inline std::string GetXmlNodeTagName(const CPLXMLNode* node)
@@ -951,10 +916,113 @@ namespace
 		return nullptr;
 	}
 
+	static inline bool IsAsciiDigit(char ch)
+	{
+		return ch >= '0' && ch <= '9';
+	}
+
+	static bool ParseVersionComponent(const std::string& versionText, size_t& position, const unsigned int capValue, unsigned int& componentValue)
+	{
+		if (position >= versionText.size() || !IsAsciiDigit(versionText[position]))
+		{
+			return false;
+		}
+
+		unsigned int value = 0;
+
+		while (position < versionText.size() && IsAsciiDigit(versionText[position]))
+		{
+			const unsigned int digit = static_cast<unsigned int>(versionText[position] - '0');
+
+			if (value < capValue)
+			{
+				if (value > (capValue - digit) / 10)
+				{
+					value = capValue;
+				}
+				else
+				{
+					value = value * 10 + digit;
+					if (value > capValue)
+					{
+						value = capValue;
+					}
+				}
+			}
+
+			position++;
+		}
+
+		componentValue = value;
+		return true;
+	}
+
+	// 判断 versionText 是否是“10.3 及以前的版本”
+	static bool IsVersionAtMost10_3(const std::string& versionText)
+	{
+		if (versionText.empty())
+		{
+			return false;
+		}
+
+		size_t position = 0;
+
+		unsigned int majorVersion = 0;
+		if (!ParseVersionComponent(versionText, position, 11, majorVersion))
+		{
+			return false;
+		}
+
+		// 只有一个分段，例如 "10"、"9"、"11"
+		if (position == versionText.size())
+		{
+			return majorVersion <= 10;
+		}
+
+		if (versionText[position] != '.')
+		{
+			return false;
+		}
+		position++;
+
+		unsigned int minorVersion = 0;
+		if (!ParseVersionComponent(versionText, position, 4, minorVersion))
+		{
+			return false;
+		}
+
+		// 剩余分段只需要保证“格式合法”，不需要真的参与比较。
+		while (position < versionText.size())
+		{
+			if (versionText[position] != '.')
+			{
+				return false;
+			}
+			position++;
+
+			if (position >= versionText.size() || !IsAsciiDigit(versionText[position]))
+			{
+				return false;
+			}
+
+			while (position < versionText.size() && IsAsciiDigit(versionText[position]))
+			{
+				position++;
+			}
+		}
+
+		return (majorVersion < 10) || (majorVersion == 10 && minorVersion <= 3);
+	}
+
 	class WmsCapabilitiesParser
 	{
 	public:
 		WmsCapabilitiesParser() : valid(false), parserOptions(), numLayers(-1) {}
+
+		void SetArcGISMapServiceInfo(const ArcGISMapServiceInfo* arcGISMapServiceInfo)
+		{
+			this->arcGISMapServiceInfo = arcGISMapServiceInfo;
+		}
 
 		bool Parse(const std::string& capabilitiesXmlUtf8, const WmsParserOptions& options, const std::string& baseUrl)
 		{
@@ -1039,6 +1107,7 @@ namespace
 
 	private:
 		bool valid = false;
+		const ArcGISMapServiceInfo* arcGISMapServiceInfo = nullptr;
 		WmsParserOptions parserOptions;
 		int numLayers = -1;
 		std::unordered_map<int, int> layerParentIdMap; // layerId -> parentLayerId
@@ -2536,10 +2605,15 @@ namespace
 					continue;
 				}
 
-				const double metersPerUnit = crs->GetMetersPerUnit();
+				double metersPerUnit = crs->GetMetersPerUnit();
 				if (metersPerUnit > 0)
 				{
 					set.crsUtf8 = crs->ToEpsgStringUtf8();
+					if (arcGISMapServiceInfo && crs->IsGeographic() && IsVersionAtMost10_3(arcGISMapServiceInfo->m_currentVersion) &&
+						GB_Utf8StartsWith(std::to_string(metersPerUnit), "111319.49"))
+					{
+						metersPerUnit = oldArcGISServerMetersPerUnit;
+					}
 				}
 				else
 				{
@@ -3143,7 +3217,7 @@ namespace
 			const std::string& dcpType = capabilities.capability.request.getTile.dcpTypes[0].http.get.onlineResource.xlinkHrefUtf8;
 			return GB_Utf8Find(dcpType, GB_STR("tianditu"), false) > 0;
 		}
-
+		
 		bool DetectTileLayerBoundingBox(WmtsTileLayer& tileLayer)
 		{
 			if (tileLayer.setLinks.empty())
@@ -3174,7 +3248,13 @@ namespace
 				}
 
 				const WmtsTileMatrix& tileMatrix = lastIt->second;
-				const double metersPerUnit = crs->GetMetersPerUnit();
+				double metersPerUnit = crs->GetMetersPerUnit();
+				if (arcGISMapServiceInfo && crs->IsGeographic() && IsVersionAtMost10_3(arcGISMapServiceInfo->m_currentVersion) &&
+					GB_Utf8StartsWith(std::to_string(metersPerUnit), "111319.49"))
+				{
+					metersPerUnit = oldArcGISServerMetersPerUnit;
+				}
+
 				const double pixelSize = (IsTianditu() ? tiandituRenderingPixelSize : standardRenderingPixelSize);
 				const double resolution = tileMatrix.scaleDenominator * pixelSize / metersPerUnit;
 				const GB_Point2d bottomRight(tileMatrix.topLeft.x + resolution * tileMatrix.tileWidth * tileMatrix.matrixWidth, tileMatrix.topLeft.y - resolution * tileMatrix.tileHeight * tileMatrix.matrixHeight);
@@ -3190,11 +3270,15 @@ namespace
 	};
 }
 
-bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, const std::string& baseUrl, WmsCapabilitiesProperty& outCapabilities, const WmsParserOptions& options)
+bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, const std::string& baseUrl, WmsCapabilitiesProperty& outCapabilities, const ArcGISMapServiceInfo* arcGISMapServiceInfo, const WmsParserOptions& options)
 {
 	outCapabilities = WmsCapabilitiesProperty();
 
 	WmsCapabilitiesParser parser;
+	if (arcGISMapServiceInfo)
+	{
+		parser.SetArcGISMapServiceInfo(arcGISMapServiceInfo);
+	}
 	if (!parser.Parse(capabilitiesXmlUtf8, options, baseUrl))
 	{
 		return false;
@@ -3464,7 +3548,330 @@ bool BuildWmsLayerTree(const WmsCapabilitiesProperty& capabilities, WmsTreeNode&
 	return true;
 }
 
+namespace
+{
+	static const WmsLayerProperty* FindWmsLayer(const std::vector<WmsLayerProperty>& layers, const std::string& layerName)
+	{
+		for (size_t i = 0; i < layers.size(); i++)
+		{
+			const WmsLayerProperty& layer = layers[i];
+			if (layer.nameUtf8 == layerName)
+			{
+				return &layer;
+			}
 
+			const WmsLayerProperty* foundLayer = FindWmsLayer(layer.subLayers, layerName);
+			if (foundLayer)
+			{
+				return foundLayer;
+			}
+		}
+
+		return nullptr;
+	}
+
+	static inline const WmsLayerProperty* FindWmsLayer(const WmsCapabilitiesProperty* capabilities, const std::string& layerName)
+	{
+		if (!capabilities || layerName.empty())
+		{
+			return nullptr;
+		}
+
+		return FindWmsLayer(capabilities->capability.layers, layerName);
+	}
+
+	static const WmtsTileLayer* FindWmtsTileLayer(const WmsCapabilitiesProperty* capabilities, const std::string& layerName)
+	{
+		if (!capabilities || layerName.empty())
+		{
+			return nullptr;
+		}
+
+		const std::vector<WmtsTileLayer>& tileLayers = capabilities->capability.tileLayers;
+		for (const WmtsTileLayer& tileLayer : tileLayers)
+		{
+			if (tileLayer.identifierUtf8 == layerName)
+			{
+				return &tileLayer;
+			}
+		}
+
+		return nullptr;
+	}
+
+	static std::string FindLayerTitle(const WmsCapabilitiesProperty* capabilities, const std::string& layerName, bool* success = nullptr)
+	{
+		if (success)
+		{
+			*success = false;
+		}
+
+		if (!capabilities || layerName.empty())
+		{
+			return "";
+		}
+
+		for (const WmtsTileLayer& wmtsLayer : capabilities->capability.tileLayers)
+		{
+			if (wmtsLayer.identifierUtf8 == layerName)
+			{
+				if (success)
+				{
+					*success = true;
+				}
+				return wmtsLayer.titleUtf8;
+			}
+		}
+
+		const WmsLayerProperty* foundWmsLayer = FindWmsLayer(capabilities->capability.layers, layerName);
+		if (foundWmsLayer)
+		{
+			if (success)
+			{
+				*success = true;
+			}
+			return foundWmsLayer->titleUtf8;
+		}
+
+		return "";
+	}
+
+	static std::vector<std::string> GetTileLayerStyles(const WmtsTileLayer* tileLayer, bool* success = nullptr)
+	{
+		if (success)
+		{
+			*success = false;
+		}
+
+		if (!tileLayer)
+		{
+			return {};
+		}
+
+		std::vector<std::string> styles;
+		styles.reserve(tileLayer->styles.size());
+		for (const auto& pair : tileLayer->styles)
+		{
+			styles.push_back(pair.first);
+		}
+
+		if (success)
+		{
+			*success = true;
+		}
+		return styles;
+	}
+
+	static std::vector<std::string> GetWmsLayerStyles(const WmsLayerProperty* wmsLayer, bool* success = nullptr)
+	{
+		if (success)
+		{
+			*success = false;
+		}
+
+		if (!wmsLayer)
+		{
+			return {};
+		}
+
+		std::vector<std::string> styles(wmsLayer->styles.size());
+		for (size_t i = 0; i < wmsLayer->styles.size(); i++)
+		{
+			styles[i] = wmsLayer->styles[i].nameUtf8;
+		}
+		return styles;
+	}
+
+	static std::vector<std::string> FindTileLayerStyles(const WmsCapabilitiesProperty* capabilities, const std::string& tileLayerName, bool* success = nullptr)
+	{
+		if (success)
+		{
+			*success = false;
+		}
+
+		if (!capabilities || tileLayerName.empty())
+		{
+			return {};
+		}
+
+		const WmtsTileLayer* tileLayer = FindWmtsTileLayer(capabilities, tileLayerName);
+		if (!tileLayer)
+		{
+			return {};
+		}
+
+		return GetTileLayerStyles(tileLayer, success);
+	}
+
+	static std::vector<std::string> GetTileLayerMatrixSets(const WmtsTileLayer* tileLayer, bool* success = nullptr)
+	{
+		if (success)
+		{
+			*success = false;
+		}
+
+		if (!tileLayer)
+		{
+			return {};
+		}
+
+		std::vector<std::string> matrixSets;
+		matrixSets.reserve(tileLayer->setLinks.size());
+		for (const auto& pair : tileLayer->setLinks)
+		{
+			matrixSets.push_back(pair.first);
+		}
+
+		if (success)
+		{
+			*success = true;
+		}
+		return matrixSets;
+	}
+
+	static std::vector<std::string> FindTileLayerMatrixSets(const WmsCapabilitiesProperty* capabilities, const std::string& tileLayerName, bool* success = nullptr)
+	{
+		if (success)
+		{
+			*success = false;
+		}
+
+		if (!capabilities || tileLayerName.empty())
+		{
+			return {};
+		}
+
+		const WmtsTileLayer* tileLayer = FindWmtsTileLayer(capabilities, tileLayerName);
+		if (!tileLayer)
+		{
+			return {};
+		}
+
+		return GetTileLayerMatrixSets(tileLayer, success);
+	}
+}
+
+std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapRequestItemsInput& input, bool* success)
+{
+	if (success)
+	{
+		*success = false;
+	}
+
+	if (!input.capabilities)
+	{
+		return {};
+	}
+
+	std::string styleName = "";
+	std::string tileMatrixSetName = "";
+	std::string formatName = "";
+	if (input.mapType == MapTileMode::WMTS)
+	{
+		const WmtsTileLayer* tileLayer = FindWmtsTileLayer(input.capabilities, input.layerNameUtf8);
+		if (!tileLayer)
+		{
+			return {};
+		}
+		
+		const std::vector<std::string> tileLayerStyles = GetTileLayerStyles(tileLayer);
+		if (input.styleUtf8.empty())
+		{
+			if (tileLayerStyles.size() != 1)
+			{
+				return {};
+			}
+			styleName = tileLayerStyles[0];
+		}
+		else
+		{
+			if (std::find(tileLayerStyles.begin(), tileLayerStyles.end(), input.styleUtf8) == tileLayerStyles.end())
+			{
+				return {};
+			}
+			styleName = input.styleUtf8;
+		}
+
+		const std::vector<std::string> matrixSetNames = GetTileLayerMatrixSets(tileLayer);
+		if (input.tileMatrixSetUtf8.empty())
+		{
+			if (matrixSetNames.size() != 1)
+			{
+				return {};
+			}
+			tileMatrixSetName = matrixSetNames[0];
+		}
+		else
+		{
+			if (std::find(matrixSetNames.begin(), matrixSetNames.end(), input.tileMatrixSetUtf8) == matrixSetNames.end())
+			{
+				return {};
+			}
+			tileMatrixSetName = input.tileMatrixSetUtf8;
+		}
+
+		const std::vector<std::string>& formats = tileLayer->formats;
+		if (input.formatUtf8.empty())
+		{
+			if (formats.size() != 1)
+			{
+				return {};
+			}
+			formatName = formats[0];
+		}
+		else
+		{
+			if (std::find(formats.begin(), formats.end(), input.formatUtf8) == formats.end())
+			{
+				return {};
+			}
+			formatName = input.formatUtf8;
+		}
+	}
+	else if (input.mapType == MapTileMode::WMSC)
+	{
+		const WmsLayerProperty* wmsLayer = FindWmsLayer(input.capabilities, input.layerNameUtf8);
+		if (!wmsLayer)
+		{
+			return {};
+		}
+
+		const std::vector<std::string> wmsLayerStyles = GetWmsLayerStyles(wmsLayer);
+		if (input.styleUtf8.empty())
+		{
+			if (wmsLayerStyles.size() != 1)
+			{
+				return {};
+			}
+			styleName = wmsLayerStyles[0];
+		}
+		else
+		{
+			if (std::find(wmsLayerStyles.begin(), wmsLayerStyles.end(), input.styleUtf8) == wmsLayerStyles.end())
+			{
+				return {};
+			}
+			styleName = input.styleUtf8;
+		}
+
+
+
+
+
+
+
+
+
+	}
+
+
+
+
+
+
+
+
+}
 
 
 

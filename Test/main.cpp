@@ -12,7 +12,7 @@ int main(int argc, char* argv[])
 	GB_SetConsoleEncodingToUtf8();
 	GB_SetLogToConsole(true);
 
-	const std::string baseUrl = GB_STR("http://192.168.61.172:6080/arcgis/rest/services/zhejiang/%E6%B5%99%E6%B1%9Flocal%E6%B5%8B%E8%AF%95/MapServer/WMTS/1.0.0/WMTSCapabilities.xml");
+	const std::string baseUrl = GB_STR("https://ovc.catastro.meh.es/Cartografia/WMS/ServidorWMS.aspx?SERVICE=WMS&REQUEST=GETCAPABILITIES");
 
 	std::string capabilitiesXmlUtf8 = "";
 	if (!DownloadWmsCapabilities(baseUrl, capabilitiesXmlUtf8) || capabilitiesXmlUtf8.empty())
@@ -22,9 +22,10 @@ int main(int argc, char* argv[])
 
 	ArcGISMapServiceInfo mapServiceInfo;
 	const bool success = RequestArcGISServerJson(baseUrl, mapServiceInfo);
+	const ArcGISMapServiceInfo* mapServiceInfoPtr = (success ? &mapServiceInfo : nullptr);
 
 	WmsCapabilitiesProperty capabilities;
-	if (!ParseWmsCapabilities(capabilitiesXmlUtf8, baseUrl, capabilities))
+	if (!ParseWmsCapabilities(capabilitiesXmlUtf8, baseUrl, capabilities, mapServiceInfoPtr))
 	{
 		return 1;
 	}
@@ -37,7 +38,7 @@ int main(int argc, char* argv[])
 
 	const std::string wmsTreeString = rootNode.ToString();
 	std::cout << wmsTreeString << std::endl;
-	GB_WriteUtf8ToFile("CapabilitiesLayerTree.txt", wmsTreeString);
+	//GB_WriteUtf8ToFile("CapabilitiesLayerTree.txt", wmsTreeString);
 	return 0;
 }
 

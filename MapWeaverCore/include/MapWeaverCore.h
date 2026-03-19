@@ -3,6 +3,7 @@
 
 #include "MapWeaverPort.h"
 #include "GB_Network.h"
+#include "Geometry/GB_Polygon.h"
 #include "MapLayer.h"
 #include "ArcGISMapServiceInfo.h"
 #include <string>
@@ -13,15 +14,13 @@ MAPWEAVERCORE_PORT bool DownloadWmsCapabilities(const std::string& urlUtf8, std:
 
 MAPWEAVERCORE_PORT bool RequestArcGISServerJson(const std::string& urlUtf8, ArcGISMapServiceInfo& mapServiceInfo, const GB_NetworkRequestOptions& options = GB_NetworkRequestOptions());
 
-MAPWEAVERCORE_PORT bool RequestArcGISServerVersion(const std::string& urlUtf8, std::string& outVersionUtf8, const GB_NetworkRequestOptions& options = GB_NetworkRequestOptions());
-
 struct WmsParserOptions
 {
 	bool ignoreAxisOrientation = false;
 	bool invertAxisOrientation = false;
 };
 
-MAPWEAVERCORE_PORT bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, const std::string& baseUrl, WmsCapabilitiesProperty& outCapabilities, const WmsParserOptions& options = WmsParserOptions());
+MAPWEAVERCORE_PORT bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, const std::string& baseUrl, WmsCapabilitiesProperty& outCapabilities, const ArcGISMapServiceInfo* arcGISMapServiceInfo = nullptr, const WmsParserOptions& options = WmsParserOptions());
 
 struct BuildLayerTreeOptions
 {
@@ -63,21 +62,18 @@ struct BuildVisibleMapRequestItemsInput
 	MapTileMode mapType;
 	const WmsCapabilitiesProperty* capabilities = nullptr;
 	std::string mapServiceUrlUtf8 = "";
-	std::string layerIdentifierUtf8 = "";
+	std::string layerNameUtf8 = "";
 	std::string styleUtf8 = "";
 	std::string tileMatrixSetUtf8 = "";
 	std::string formatUtf8 = "";
 	int minZoomLevel = -1;
 	int maxZoomLevel = -1;
 
-	
-
-
-
-
+	std::string requestAreaWkt = "";
+	GB_Polygon requestAreaPolygon;
 };
 
-MAPWEAVERCORE_PORT std::vector<MapRequestItem> BuildVisibleMapRequestItems(MapTileMode mapType, const WmsCapabilitiesProperty* capabilities, const GeoBoundingBox& viewportBBox);
+MAPWEAVERCORE_PORT std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapRequestItemsInput& input, bool* success = nullptr);
 
 
 
