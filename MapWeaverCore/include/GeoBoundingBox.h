@@ -43,6 +43,8 @@ public:
 
 	// 返回 ClampRectToCrsValidArea() 的结果副本（当前对象不变）。
 	GeoBoundingBox ClampedRectToCrsValidArea() const;
+
+	bool Transform(GeoBoundingBox& outBBox) const;
 };
 
 #ifdef _MSC_VER

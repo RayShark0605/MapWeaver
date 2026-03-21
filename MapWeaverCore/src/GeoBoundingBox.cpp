@@ -1,6 +1,7 @@
 ﻿#include "GeoBoundingBox.h"
 
 #include "GeoCrsManager.h"
+#include "GeoCrsTransform.h"
 #include "GeoCrs.h"
 #include "GB_Crypto.h"
 #include "GB_IO.h"
@@ -557,4 +558,15 @@ GeoBoundingBox GeoBoundingBox::ClampedRectToCrsValidArea() const
 	GeoBoundingBox result = *this;
 	result.ClampRectToCrsValidArea();
 	return result;
+}
+
+bool GeoBoundingBox::Transform(GeoBoundingBox& outBBox) const
+{
+	outBBox.rect.Reset();
+	if (!IsValid())
+	{
+		return false;
+	}
+
+	return GeoCrsTransform::TransformBoundingBox(*this, outBBox.wktUtf8, outBBox);
 }

@@ -3749,6 +3749,100 @@ namespace
 
 		return GetTileLayerMatrixSets(tileLayer, success);
 	}
+
+	static std::string SelectAppropriateWmsFormat(const std::vector<std::string>& supportedWmsFormats, bool* success = nullptr)
+	{
+		if (success)
+		{
+			*success = false;
+		}
+
+		static const std::vector<std::string> preferredFullFormats = {
+			"image/png", "image/tiff", "image/geotiff", "image/bmp", "image/jpg", "image/jpeg", "image/webp", "image/gif"
+		};
+		static const std::vector<std::string> preferredFormatSections = {
+			"png", "tiff", "bmp", "jpg", "jpeg", "webp", "gif"
+		};
+
+		for (const std::string& fullFormat : preferredFullFormats)
+		{
+			for (const std::string& supportedWmsFormat : supportedWmsFormats)
+			{
+				if (GB_Utf8Equals(fullFormat, supportedWmsFormat, false))
+				{
+					if (success)
+					{
+						*success = true;
+					}
+					return supportedWmsFormat;
+				}
+			}
+		}
+
+		for (const std::string& formatSection : preferredFormatSections)
+		{
+			for (const std::string& supportedWmsFormat : supportedWmsFormats)
+			{
+				if (GB_Utf8Find(supportedWmsFormat, formatSection, false) >= 0)
+				{
+					if (success)
+					{
+						*success = true;
+					}
+					return supportedWmsFormat;
+				}
+			}
+		}
+
+		return "";
+	}
+
+	static bool TransformGeoPolygon(const std::string& sourceWkt, const GB_Polygon& polygon, const std::string& targetWkt)
+	{
+		std::shared_ptr<const GeoCrs> sourceCrs = GeoCrsManager::GetFromDefinitionCached(sourceWkt);
+		if (!sourceCrs || !polygon.IsValid())
+		{
+			return false;
+		}
+
+		const GeoBoundingBox srcCrsMaxBBox = sourceCrs->GetValidArea(); // 原坐标系在它自身坐标系下的最大范围
+		if (!srcCrsMaxBBox.IsValid())
+		{
+			return false;
+		}
+
+		std::vector<GB_Polygon> validSrcAreas; // 原多边形在原坐标系下的有效范围
+		std::vector<std::vector<GB_Polygon>> holes;
+		if (!polygon.ComputeIntersection(GB_Polygon(srcCrsMaxBBox.rect), validSrcAreas, holes))
+		{
+			return false;
+		}
+
+		GeoBoundingBox srcCrsMaxBBoxIn4326(GB_ToWkt("EPSG:4326")); // 
+		if (!srcCrsMaxBBox.Transform(srcCrsMaxBBoxIn4326) || !srcCrsMaxBBoxIn4326.IsValid())
+		{
+			return false;
+		}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	}
 }
 
 std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapRequestItemsInput& input, bool* success)
@@ -3827,6 +3921,29 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 			}
 			formatName = input.formatUtf8;
 		}
+
+		const WmtsTileMatrixSet* tileMatrixSet = nullptr;
+		{
+			const auto it = input.capabilities->capability.tileMatrixSets.find(tileMatrixSetName);
+			if (it == input.capabilities->capability.tileMatrixSets.end())
+			{
+				return {};
+			}
+			tileMatrixSet = &(it->second);
+		}
+		if (!tileMatrixSet)
+		{
+			return {};
+		}
+
+
+
+
+
+
+
+
+
 	}
 	else if (input.mapType == MapTileMode::WMSC)
 	{
@@ -3854,14 +3971,19 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 			styleName = input.styleUtf8;
 		}
 
-
-
-
-
-
-
-
-
+		const std::vector<std::string>& formats = input.capabilities->capability.request.getMap.formatsUtf8;
+		if (input.formatUtf8.empty())
+		{
+			formatName = SelectAppropriateWmsFormat(formats);
+		}
+		else
+		{
+			if (std::find(formats.begin(), formats.end(), input.formatUtf8) == formats.end())
+			{
+				return {};
+			}
+			formatName = input.formatUtf8;
+		}
 	}
 
 
