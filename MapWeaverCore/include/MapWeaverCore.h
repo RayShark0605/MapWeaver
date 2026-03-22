@@ -71,12 +71,14 @@ struct BuildVisibleMapRequestItemsInput
 
 	std::string requestAreaWkt = "";
 	GB_Polygon requestAreaPolygon;
+
+
+
+
+
 };
 
 MAPWEAVERCORE_PORT std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapRequestItemsInput& input, bool* success = nullptr);
-
-
-
 
 
 

@@ -8,6 +8,7 @@
 #include "GB_Utf8String.h"
 
 #include "Geometry/GB_Point2d.h"
+#include "Geometry/GB_Polygon.h"
 #include "Geometry/GB_Rectangle.h"
 
 #include "ogr_spatialref.h"
@@ -426,6 +427,41 @@ namespace
         return outTargetRect.IsValid() && outTargetRect.Area() > 0.0;
     }
 
+    static bool TryTransformPolygonInternal(const std::string& sourceWktUtf8, const std::string& targetWktUtf8, const GB_Polygon& sourcePolygon, GB_Polygon& outPolygon, bool enableOpenMP)
+    {
+        outPolygon = sourcePolygon;
+
+        if (sourcePolygon.IsEmpty())
+        {
+            return true;
+        }
+
+        if (!sourcePolygon.IsValid())
+        {
+            return false;
+        }
+
+        std::vector<GB_Point2d> transformedVertices = sourcePolygon.GetVerticesAsDouble();
+        if (transformedVertices.size() != sourcePolygon.GetNumVertices())
+        {
+            return false;
+        }
+
+        if (!GeoCrsTransform::TransformPoints(sourceWktUtf8, targetWktUtf8, transformedVertices, enableOpenMP))
+        {
+            return false;
+        }
+
+        GB_Polygon transformedPolygon;
+        if (!transformedPolygon.SetVertices(std::move(transformedVertices)))
+        {
+            return false;
+        }
+
+        outPolygon = std::move(transformedPolygon);
+        return outPolygon.IsValid();
+    }
+
     static void TransformPointsChunkInternal(
         TransformItem& item,
         std::vector<GB_Point2d>& points,
@@ -632,6 +668,23 @@ bool GeoCrsTransform::TransformPoints(const std::string& sourceWktUtf8, const st
     return allOk.load(std::memory_order_relaxed);
 }
 
+bool GeoCrsTransform::TransformPolygon(const std::string& sourceWktUtf8, const std::string& targetWktUtf8, const GB_Polygon& sourcePolygon, GB_Polygon& outPolygon, bool enableOpenMP)
+{
+    return TryTransformPolygonInternal(sourceWktUtf8, targetWktUtf8, sourcePolygon, outPolygon, enableOpenMP);
+}
+
+bool GeoCrsTransform::TransformPolygon(const std::string& sourceWktUtf8, const std::string& targetWktUtf8, GB_Polygon& inOutPolygon, bool enableOpenMP)
+{
+    GB_Polygon transformedPolygon;
+    if (!TransformPolygon(sourceWktUtf8, targetWktUtf8, inOutPolygon, transformedPolygon, enableOpenMP))
+    {
+        return false;
+    }
+
+    inOutPolygon = std::move(transformedPolygon);
+    return true;
+}
+
 bool GeoCrsTransform::TransformXY(const std::string& sourceWktUtf8, const std::string& targetWktUtf8, double x, double y, double& outX, double& outY)
 {
     outX = x;
@@ -765,7 +818,7 @@ bool GeoCrsTransform::TryTransformBoundingBoxes(std::vector<GeoBoundingBox>& inO
 
         bbox.wktUtf8 = item->canonicalTargetWkt;
         bbox.rect = targetRect;
-    };
+        };
 
     if (enableOpenMP)
     {

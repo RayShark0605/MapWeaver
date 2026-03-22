@@ -7,6 +7,7 @@
 #include <vector>
 
 class GB_Point2d;
+class GB_Polygon;
 class GeoBoundingBox;
 
 // GeoCrsTransform
@@ -36,23 +37,31 @@ public:
     // - 返回值语义同上。
     static bool TransformPoints(const std::string& sourceWktUtf8, const std::string& targetWktUtf8, std::vector<GB_Point2d>& inOutPoints, bool enableOpenMP = false);
 
-    // （3）传入 x、y 坐标从一个 WKT 转到另一个 WKT。
+    // （3）把单个 GB_Polygon 从一个 WKT 转到另一个 WKT（输出到 outPolygon）。
+    // - 输出多边形使用 Double 模式存储转换后的顶点。
+    // - 返回 false 时，outPolygon 会尽量保持为 sourcePolygon。
+    static bool TransformPolygon(const std::string& sourceWktUtf8, const std::string& targetWktUtf8, const GB_Polygon& sourcePolygon, GB_Polygon& outPolygon, bool enableOpenMP = false);
+
+    // （3）把单个 GB_Polygon 从一个 WKT 转到另一个 WKT（原地修改）。
+    static bool TransformPolygon(const std::string& sourceWktUtf8, const std::string& targetWktUtf8, GB_Polygon& inOutPolygon, bool enableOpenMP = false);
+
+    // （4）传入 x、y 坐标从一个 WKT 转到另一个 WKT。
     static bool TransformXY(const std::string& sourceWktUtf8, const std::string& targetWktUtf8, double x, double y, double& outX, double& outY);
 
-    // （4）传入 x、y、z 坐标从一个 WKT 转到另一个 WKT。
+    // （5）传入 x、y、z 坐标从一个 WKT 转到另一个 WKT。
     static bool TransformXYZ(const std::string& sourceWktUtf8, const std::string& targetWktUtf8, double x, double y, double z, double& outX, double& outY, double& outZ);
 
-    // （5）把单个 GeoBoundingBox 从当前 wkt 转到另一个 wkt（输出到 outBox）。
+    // （6）把单个 GeoBoundingBox 从当前 wkt 转到另一个 wkt（输出到 outBox）。
     static bool TransformBoundingBox(const GeoBoundingBox& sourceBox, const std::string& targetWktUtf8, GeoBoundingBox& outBox, int sampleGridCount = 11);
 
-    // （5）把单个 GeoBoundingBox 从当前 wkt 转到另一个 wkt（原地修改）。
+    // （6）把单个 GeoBoundingBox 从当前 wkt 转到另一个 wkt（原地修改）。
     static bool TransformBoundingBox(GeoBoundingBox& inOutBox, const std::string& targetWktUtf8, int sampleGridCount = 11);
 
-    // （6）把多个 GeoBoundingBox 从各自的 wkt 转到另一个 wkt（输出到 outBoxes）。
+    // （7）把多个 GeoBoundingBox 从各自的 wkt 转到另一个 wkt（输出到 outBoxes）。
     // - 返回值：所有 bbox 均成功变换返回 true；任一失败返回 false（失败项会被写成 Invalid）。
     static bool TransformBoundingBoxes(const std::vector<GeoBoundingBox>& sourceBoxes, const std::string& targetWktUtf8, std::vector<GeoBoundingBox>& outBoxes, bool enableOpenMP = false, int sampleGridCount = 11);
 
-    // （6）把多个 GeoBoundingBox 从各自的 wkt 转到另一个 wkt（原地修改）。
+    // （7）把多个 GeoBoundingBox 从各自的 wkt 转到另一个 wkt（原地修改）。
     static bool TryTransformBoundingBoxes(std::vector<GeoBoundingBox>& inOutBoxes, const std::string& targetWktUtf8, bool enableOpenMP = false, int sampleGridCount = 11);
 
 private:

@@ -3797,17 +3797,21 @@ namespace
 		return "";
 	}
 
-	static bool TransformGeoPolygon(const std::string& sourceWkt, const GB_Polygon& polygon, const std::string& targetWkt)
+	static bool TransformGeoPolygon(const std::string& sourceWkt, const GB_Polygon& polygon, const std::string& targetWkt, std::vector<GB_Polygon>& outResult)
 	{
+		outResult.clear();
+
 		std::shared_ptr<const GeoCrs> sourceCrs = GeoCrsManager::GetFromDefinitionCached(sourceWkt);
 		if (!sourceCrs || !polygon.IsValid())
 		{
+			GBLOG_WARNING(GB_Utf8Format("Failed to get source CRS from WKT '%s' or the input polygon is invalid. Source CRS: %s, Polygon valid: %s", sourceWkt.c_str(), sourceCrs ? "valid" : "invalid", polygon.IsValid() ? "true" : "false"));
 			return false;
 		}
 
 		const GeoBoundingBox srcCrsMaxBBox = sourceCrs->GetValidArea(); // 原坐标系在它自身坐标系下的最大范围
 		if (!srcCrsMaxBBox.IsValid())
 		{
+			GBLOG_WARNING(GB_Utf8Format("Valid area of source CRS '%s' is invalid. Source CRS: %s, Valid area: %s", sourceWkt.c_str(), sourceCrs->ExportToWktUtf8().c_str(), srcCrsMaxBBox.rect.SerializeToString().c_str()));
 			return false;
 		}
 
@@ -3815,33 +3819,77 @@ namespace
 		std::vector<std::vector<GB_Polygon>> holes;
 		if (!polygon.ComputeIntersection(GB_Polygon(srcCrsMaxBBox.rect), validSrcAreas, holes))
 		{
+			GBLOG_WARNING(GB_Utf8Format("Failed to compute intersection of input polygon with valid area of source CRS '%s'. Source CRS: %s, Valid area: %s, Input polygon: %s", sourceWkt.c_str(), sourceCrs->ExportToWktUtf8().c_str(), srcCrsMaxBBox.rect.SerializeToString().c_str(), polygon.SerializeToString().c_str()));
 			return false;
 		}
 
-		GeoBoundingBox srcCrsMaxBBoxIn4326(GB_ToWkt("EPSG:4326")); // 
-		if (!srcCrsMaxBBox.Transform(srcCrsMaxBBoxIn4326) || !srcCrsMaxBBoxIn4326.IsValid())
+		std::vector<GB_Polygon> validSrcAreasIn4326; // 原多边形的有效范围转换到4326坐标系下的范围
+		validSrcAreasIn4326.reserve(validSrcAreas.size());
+		for (const GB_Polygon& validSrcArea : validSrcAreas)
 		{
+			GB_Polygon validSrcAreaIn4326;
+			if (GeoCrsTransform::TransformPolygon(sourceWkt, GB_ToWkt("EPSG:4326"), validSrcArea, validSrcAreaIn4326) && validSrcAreaIn4326.IsValid())
+			{
+				validSrcAreasIn4326.push_back(std::move(validSrcAreaIn4326));
+				continue;
+			}
+		}
+		if (validSrcAreasIn4326.empty())
+		{
+			GBLOG_WARNING(GB_Utf8Format("Failed to transform any valid area of the input polygon to EPSG:4326. Source CRS: %s, Valid areas in source CRS: %d, Input polygon: %s", sourceWkt.c_str(), static_cast<int>(validSrcAreas.size()), polygon.SerializeToString().c_str()));
 			return false;
 		}
 
+		std::shared_ptr<const GeoCrs> targetCrs = GeoCrsManager::GetFromDefinitionCached(targetWkt);
+		if (!targetCrs)
+		{
+			GBLOG_WARNING(GB_Utf8Format("Failed to get target CRS from WKT '%s'. Target CRS: %s", targetWkt.c_str(), targetCrs ? "valid" : "invalid"));
+			return false;
+		}
+		const GeoBoundingBox targetCrsMaxBBoxIn4326 = targetCrs->GetValidAreaLonLat(); // 目标坐标系在4326坐标系下的最大范围
+		if (!targetCrsMaxBBoxIn4326.IsValid())
+		{
+			GBLOG_WARNING(GB_Utf8Format("Valid area of target CRS '%s' is invalid. Target CRS: %s, Valid area in 4326: %s", targetWkt.c_str(), targetCrs->ExportToWktUtf8().c_str(), targetCrsMaxBBoxIn4326.rect.SerializeToString().c_str()));
+			return false;
+		}
 
+		std::vector<GB_Polygon> intersectionAreasIn4326; // 原多边形的有效范围转换到4326坐标系下与目标坐标系在4326坐标系下的有效范围的交集
+		for (const GB_Polygon& validSrcAreaIn4326 : validSrcAreasIn4326)
+		{
+			std::vector<GB_Polygon> intersectionAreas;
+			std::vector<std::vector<GB_Polygon>> intersectioHoles;
+			if (validSrcAreaIn4326.ComputeIntersection(GB_Polygon(targetCrsMaxBBoxIn4326.rect), intersectionAreas, intersectioHoles))
+			{
+				for (const GB_Polygon& intersectionArea : intersectionAreas)
+				{
+					if (intersectionArea.IsValid())
+					{
+						intersectionAreasIn4326.push_back(intersectionArea);
+					}
+				}
+			}
+		}
+		if (intersectionAreasIn4326.empty())
+		{
+			GBLOG_WARNING(GB_Utf8Format("No intersection area between valid areas of the input polygon transformed to 4326 and the valid area of the target CRS transformed to 4326. Source CRS: %s, Target CRS: %s, Valid areas in 4326: %d, Target CRS valid area in 4326: %s, Input polygon: %s", sourceWkt.c_str(), targetWkt.c_str(), static_cast<int>(validSrcAreasIn4326.size()), targetCrsMaxBBoxIn4326.rect.SerializeToString().c_str(), polygon.SerializeToString().c_str()));
+			return false;
+		}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+		outResult.reserve(intersectionAreasIn4326.size());
+		for (const GB_Polygon& intersectionAreaIn4326 : intersectionAreasIn4326)
+		{
+			GB_Polygon transformedPolygon;
+			if (GeoCrsTransform::TransformPolygon(GB_ToWkt("EPSG:4326"), targetWkt, intersectionAreaIn4326, transformedPolygon) && transformedPolygon.IsValid())
+			{
+				outResult.push_back(std::move(transformedPolygon));
+			}
+		}
+		if (outResult.empty())
+		{
+			GBLOG_WARNING(GB_Utf8Format("Failed to transform any intersection area to target CRS. Source CRS: %s, Target CRS: %s, Intersection areas in 4326: %d, Input polygon: %s", sourceWkt.c_str(), targetWkt.c_str(), static_cast<int>(intersectionAreasIn4326.size()), polygon.SerializeToString().c_str()));
+			return false;
+		}
+		return true;
 	}
 }
 
@@ -3854,6 +3902,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 
 	if (!input.capabilities)
 	{
+		GBLOG_WARNING("Capabilities is null.");
 		return {};
 	}
 
@@ -3865,6 +3914,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		const WmtsTileLayer* tileLayer = FindWmtsTileLayer(input.capabilities, input.layerNameUtf8);
 		if (!tileLayer)
 		{
+			GBLOG_WARNING(GB_Utf8Format("Tile layer '%s' not found in capabilities.", input.layerNameUtf8.c_str()));
 			return {};
 		}
 		
@@ -3873,6 +3923,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		{
 			if (tileLayerStyles.size() != 1)
 			{
+				GBLOG_WARNING(GB_Utf8Format("Style is not specified for tile layer '%s', and there are %d styles available. Unable to determine which style to use.", input.layerNameUtf8.c_str(), static_cast<int>(tileLayerStyles.size())));
 				return {};
 			}
 			styleName = tileLayerStyles[0];
@@ -3881,6 +3932,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		{
 			if (std::find(tileLayerStyles.begin(), tileLayerStyles.end(), input.styleUtf8) == tileLayerStyles.end())
 			{
+				GBLOG_WARNING(GB_Utf8Format("Style '%s' not found for tile layer '%s'.", input.styleUtf8.c_str(), input.layerNameUtf8.c_str()));
 				return {};
 			}
 			styleName = input.styleUtf8;
@@ -3891,6 +3943,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		{
 			if (matrixSetNames.size() != 1)
 			{
+				GBLOG_WARNING(GB_Utf8Format("Tile matrix set is not specified for tile layer '%s', and there are %d tile matrix sets available. Unable to determine which tile matrix set to use.", input.layerNameUtf8.c_str(), static_cast<int>(matrixSetNames.size())));
 				return {};
 			}
 			tileMatrixSetName = matrixSetNames[0];
@@ -3899,6 +3952,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		{
 			if (std::find(matrixSetNames.begin(), matrixSetNames.end(), input.tileMatrixSetUtf8) == matrixSetNames.end())
 			{
+				GBLOG_WARNING(GB_Utf8Format("Tile matrix set '%s' not found for tile layer '%s'.", input.tileMatrixSetUtf8.c_str(), input.layerNameUtf8.c_str()));
 				return {};
 			}
 			tileMatrixSetName = input.tileMatrixSetUtf8;
@@ -3909,6 +3963,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		{
 			if (formats.size() != 1)
 			{
+				GBLOG_WARNING(GB_Utf8Format("Format is not specified for tile layer '%s', and there are %d formats available. Unable to determine which format to use.", input.layerNameUtf8.c_str(), static_cast<int>(formats.size())));
 				return {};
 			}
 			formatName = formats[0];
@@ -3917,6 +3972,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		{
 			if (std::find(formats.begin(), formats.end(), input.formatUtf8) == formats.end())
 			{
+				GBLOG_WARNING(GB_Utf8Format("Format '%s' not found for tile layer '%s'.", input.formatUtf8.c_str(), input.layerNameUtf8.c_str()));
 				return {};
 			}
 			formatName = input.formatUtf8;
@@ -3927,16 +3983,26 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 			const auto it = input.capabilities->capability.tileMatrixSets.find(tileMatrixSetName);
 			if (it == input.capabilities->capability.tileMatrixSets.end())
 			{
+				GBLOG_WARNING(GB_Utf8Format("Tile matrix set '%s' not found in capabilities.", tileMatrixSetName.c_str()));
 				return {};
 			}
 			tileMatrixSet = &(it->second);
 		}
 		if (!tileMatrixSet)
 		{
+			GBLOG_WARNING(GB_Utf8Format("Tile matrix set '%s' not found in capabilities.", tileMatrixSetName.c_str()));
+			return {};
+		}
+
+		std::vector<GB_Polygon> requestAreaInTileMatrixSetCrs;
+		if (!TransformGeoPolygon(input.requestAreaWkt, input.requestAreaPolygon, tileMatrixSet->crsUtf8, requestAreaInTileMatrixSetCrs) || requestAreaInTileMatrixSetCrs.empty())
+		{
+			GBLOG_WARNING(GB_Utf8Format("Failed to transform request area polygon to CRS of tile matrix set '%s'. Request area WKT: %s, Request area polygon: %s, Tile matrix set CRS: %s", tileMatrixSetName.c_str(), input.requestAreaWkt.c_str(), input.requestAreaPolygon.SerializeToString().c_str(), tileMatrixSet->crsUtf8.c_str()));
 			return {};
 		}
 
 
+		
 
 
 
@@ -3950,6 +4016,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		const WmsLayerProperty* wmsLayer = FindWmsLayer(input.capabilities, input.layerNameUtf8);
 		if (!wmsLayer)
 		{
+			GBLOG_WARNING(GB_Utf8Format("Layer '%s' not found in capabilities.", input.layerNameUtf8.c_str()));
 			return {};
 		}
 
@@ -3958,6 +4025,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		{
 			if (wmsLayerStyles.size() != 1)
 			{
+				GBLOG_WARNING(GB_Utf8Format("Style is not specified for layer '%s', and there are %d styles available. Unable to determine which style to use.", input.layerNameUtf8.c_str(), static_cast<int>(wmsLayerStyles.size())));
 				return {};
 			}
 			styleName = wmsLayerStyles[0];
@@ -3966,6 +4034,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		{
 			if (std::find(wmsLayerStyles.begin(), wmsLayerStyles.end(), input.styleUtf8) == wmsLayerStyles.end())
 			{
+				GBLOG_WARNING(GB_Utf8Format("Style '%s' not found for layer '%s'.", input.styleUtf8.c_str(), input.layerNameUtf8.c_str()));
 				return {};
 			}
 			styleName = input.styleUtf8;
@@ -3980,6 +4049,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		{
 			if (std::find(formats.begin(), formats.end(), input.formatUtf8) == formats.end())
 			{
+				GBLOG_WARNING(GB_Utf8Format("Format '%s' not found for GetMap request.", input.formatUtf8.c_str()));
 				return {};
 			}
 			formatName = input.formatUtf8;
@@ -3994,8 +4064,5 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 
 
 }
-
-
-
 
 
