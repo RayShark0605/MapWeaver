@@ -10,9 +10,20 @@
 #include "cpl_string.h"
 #include "cpl_json.h"
 
+#include "ogr_spatialref.h"
+#include "ogr_srs_api.h"
+#include "cpl_conv.h"
+
 #include "GB_Crypto.h"
 #include <regex>
 #include <ogr_core.h>
+#include <cmath>
+#include <cstdlib>
+#include <iomanip>
+#include <sstream>
+#include <limits>
+#include <set>
+#include <deque>
 
 constexpr static double tiandituRenderingPixelSize = 0.0254 / 96;	// 天地图：0.0254 米（1 英寸）除以 96 像素（常见屏幕分辨率）
 constexpr static double standardRenderingPixelSize = 0.00028;		// 标准：0.28 毫米（0.00028 米）
@@ -154,9 +165,9 @@ namespace
 	{
 		std::string lowerText = text;
 		std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), [](unsigned char character) -> char
-		{
-			return static_cast<char>(std::tolower(character));
-		});
+			{
+				return static_cast<char>(std::tolower(character));
+			});
 		return lowerText;
 	}
 
@@ -707,7 +718,7 @@ namespace
 		CPLErrorReset();
 		CPLJSONDocument jsonDocument;
 		if (!jsonDocument.LoadMemory(jsonText))
-		//if (!jsonDocument.LoadMemory(reinterpret_cast<const GByte*>(jsonText.data()), static_cast<int>(jsonText.size())))
+			//if (!jsonDocument.LoadMemory(reinterpret_cast<const GByte*>(jsonText.data()), static_cast<int>(jsonText.size())))
 		{
 			const char* lastErrorMessage = CPLGetLastErrorMsg();
 			*errorMessage = (nullptr != lastErrorMessage && '\0' != lastErrorMessage[0]) ? lastErrorMessage : "GDAL failed to parse json text.";
@@ -720,7 +731,7 @@ namespace
 			*errorMessage = "Root JSON value is not an object.";
 			return false;
 		}
-		
+
 		ArcGISMapServiceInfo parsedInfo;
 		TryGetMemberString(rootObject, "currentVersion", &parsedInfo.m_currentVersion);
 		TryGetMemberString(rootObject, "serviceDescription", &parsedInfo.m_serviceDescription);
@@ -728,86 +739,1250 @@ namespace
 		TryGetMemberString(rootObject, "description", &parsedInfo.m_description);
 		TryGetMemberString(rootObject, "copyrightText", &parsedInfo.m_copyrightText);
 		TryGetMemberBool(rootObject, "supportsDynamicLayers", &parsedInfo.m_supportsDynamicLayers);
-		
+
 		CPLJSONObject layersValue;
 		if (TryGetChild(rootObject, "layers", &layersValue))
 		{
 			ParseLayerInfoArray(layersValue, &parsedInfo.m_layers);
 		}
-		
+
 		CPLJSONObject tablesValue;
 		if (TryGetChild(rootObject, "tables", &tablesValue))
 		{
 			ParseLayerInfoArray(tablesValue, &parsedInfo.m_tables);
 		}
-		
+
 		CPLJSONObject spatialReferenceValue;
 		if (TryGetChild(rootObject, "spatialReference", &spatialReferenceValue))
 		{
 			parsedInfo.m_hasSpatialReference = ParseSpatialReference(spatialReferenceValue, &parsedInfo.m_spatialReference);
 		}
-		
+
 		TryGetMemberBool(rootObject, "singleFusedMapCache", &parsedInfo.m_singleFusedMapCache);
-		
+
 		CPLJSONObject tileInfoValue;
 		if (TryGetChild(rootObject, "tileInfo", &tileInfoValue))
 		{
 			parsedInfo.m_hasTileInfo = ParseTileInfo(tileInfoValue, &parsedInfo.m_tileInfo);
 		}
-		
+
 		CPLJSONObject initialExtentValue;
 		if (TryGetChild(rootObject, "initialExtent", &initialExtentValue))
 		{
 			parsedInfo.m_hasInitialExtent = ParseExtent(initialExtentValue, &parsedInfo.m_initialExtent);
 		}
-		
+
 		CPLJSONObject fullExtentValue;
 		if (TryGetChild(rootObject, "fullExtent", &fullExtentValue))
 		{
 			parsedInfo.m_hasFullExtent = ParseExtent(fullExtentValue, &parsedInfo.m_fullExtent);
 		}
-		
+
 		TryGetMemberDouble(rootObject, "minScale", &parsedInfo.m_minScale);
 		TryGetMemberDouble(rootObject, "maxScale", &parsedInfo.m_maxScale);
 		TryGetMemberString(rootObject, "units", &parsedInfo.m_units);
-		
+
 		std::string supportedImageFormatTypesText;
 		if (TryGetMemberString(rootObject, "supportedImageFormatTypes", &supportedImageFormatTypesText))
 		{
 			parsedInfo.m_supportedImageFormatTypes = SplitCommaSeparated(supportedImageFormatTypesText);
 		}
-		
+
 		CPLJSONObject documentInfoValue;
 		if (TryGetChild(rootObject, "documentInfo", &documentInfoValue))
 		{
 			ParseDocumentInfo(documentInfoValue, &parsedInfo.m_documentInfo);
 		}
-		
+
 		std::string capabilitiesText;
 		if (TryGetMemberString(rootObject, "capabilities", &capabilitiesText))
 		{
 			parsedInfo.m_capabilities = SplitCommaSeparated(capabilitiesText);
 		}
-		
+
 		std::string supportedQueryFormatsText;
 		if (TryGetMemberString(rootObject, "supportedQueryFormats", &supportedQueryFormatsText))
 		{
 			parsedInfo.m_supportedQueryFormats = SplitCommaSeparated(supportedQueryFormatsText);
 		}
-		
+
 		TryGetMemberBool(rootObject, "exportTilesAllowed", &parsedInfo.m_exportTilesAllowed);
 		TryGetMemberInt(rootObject, "maxRecordCount", &parsedInfo.m_maxRecordCount);
 		TryGetMemberInt(rootObject, "maxImageHeight", &parsedInfo.m_maxImageHeight);
 		TryGetMemberInt(rootObject, "maxImageWidth", &parsedInfo.m_maxImageWidth);
-		
+
 		std::string supportedExtensionsText;
 		if (TryGetMemberString(rootObject, "supportedExtensions", &supportedExtensionsText))
 		{
 			parsedInfo.m_supportedExtensions = SplitCommaSeparated(supportedExtensionsText);
 		}
-		
+
 		*mapServiceInfo = parsedInfo;
 		return true;
+	}
+
+	static std::string MakeStableDoubleText(double value)
+	{
+		std::ostringstream stream;
+		stream.imbue(std::locale::classic());
+		stream << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+		return stream.str();
+	}
+
+	static std::string BuildRectangleBboxText(const GB_Rectangle& rectangle)
+	{
+		if (!rectangle.IsValid())
+		{
+			return "";
+		}
+
+		return MakeStableDoubleText(rectangle.minX) + "," + MakeStableDoubleText(rectangle.minY) + "," + MakeStableDoubleText(rectangle.maxX) + "," + MakeStableDoubleText(rectangle.maxY);
+	}
+
+	static bool TryParseIntStrict(const std::string& text, int& outValue)
+	{
+		outValue = 0;
+		if (text.empty())
+		{
+			return false;
+		}
+
+		errno = 0;
+		char* endPointer = nullptr;
+		const long parsedValue = std::strtol(text.c_str(), &endPointer, 10);
+		if (errno == ERANGE || !endPointer || *endPointer != '\0')
+		{
+			return false;
+		}
+
+		if (parsedValue < static_cast<long>(std::numeric_limits<int>::min()) || parsedValue > static_cast<long>(std::numeric_limits<int>::max()))
+		{
+			return false;
+		}
+
+		outValue = static_cast<int>(parsedValue);
+		return true;
+	}
+
+	static bool IsZoomLevelAllowed(int zoomLevel, int minZoomLevel, int maxZoomLevel)
+	{
+		if (zoomLevel < 0)
+		{
+			return minZoomLevel < 0 && maxZoomLevel < 0;
+		}
+
+		if (minZoomLevel >= 0 && zoomLevel < minZoomLevel)
+		{
+			return false;
+		}
+
+		if (maxZoomLevel >= 0 && zoomLevel > maxZoomLevel)
+		{
+			return false;
+		}
+
+		return true;
+	}
+
+	static int GetTileMatrixZoomLevel(const WmtsTileMatrixSet& tileMatrixSet, const WmtsTileMatrix& tileMatrix)
+	{
+		int parsedZoomLevel = -1;
+		if (TryParseIntStrict(tileMatrix.identifierUtf8, parsedZoomLevel))
+		{
+			return parsedZoomLevel;
+		}
+
+		int derivedZoomLevel = static_cast<int>(tileMatrixSet.tileMatrices.size()) - 1;
+		for (auto it = tileMatrixSet.tileMatrices.begin(); it != tileMatrixSet.tileMatrices.end(); it++)
+		{
+			if (&(it->second) == &tileMatrix)
+			{
+				return derivedZoomLevel;
+			}
+			derivedZoomLevel--;
+		}
+
+		return -1;
+	}
+
+	static const WmtsTileMatrix* FindTileMatrixByZoomLevel(const WmtsTileMatrixSet& tileMatrixSet, int zoomLevel, int minZoomLevel, int maxZoomLevel)
+	{
+		if (zoomLevel < 0 || !IsZoomLevelAllowed(zoomLevel, minZoomLevel, maxZoomLevel))
+		{
+			return nullptr;
+		}
+
+		for (auto it = tileMatrixSet.tileMatrices.begin(); it != tileMatrixSet.tileMatrices.end(); it++)
+		{
+			const int currentZoomLevel = GetTileMatrixZoomLevel(tileMatrixSet, it->second);
+			if (currentZoomLevel == zoomLevel)
+			{
+				return &(it->second);
+			}
+		}
+
+		return nullptr;
+	}
+
+	static const WmtsTileMatrix* SelectTileMatrix(const WmtsTileMatrixSet& tileMatrixSet, double targetResolution, int requestedZoomLevel, MapRenderTargetOptions::LodSelectMode lodSelectMode, int minZoomLevel, int maxZoomLevel)
+	{
+		if (requestedZoomLevel >= 0)
+		{
+			return FindTileMatrixByZoomLevel(tileMatrixSet, requestedZoomLevel, minZoomLevel, maxZoomLevel);
+		}
+
+		if (!std::isfinite(targetResolution) || targetResolution <= 0 || tileMatrixSet.tileMatrices.empty())
+		{
+			return nullptr;
+		}
+
+		const WmtsTileMatrix* nearestTileMatrix = nullptr;
+		const WmtsTileMatrix* notCoarserTileMatrix = nullptr;
+		const WmtsTileMatrix* notFinerTileMatrix = nullptr;
+		const WmtsTileMatrix* finestTileMatrix = nullptr;
+		const WmtsTileMatrix* coarsestTileMatrix = nullptr;
+		double nearestDelta = std::numeric_limits<double>::max();
+		double bestNotCoarserResolution = -std::numeric_limits<double>::max();
+		double bestNotFinerResolution = std::numeric_limits<double>::max();
+		double finestResolution = std::numeric_limits<double>::max();
+		double coarsestResolution = -std::numeric_limits<double>::max();
+
+		for (auto it = tileMatrixSet.tileMatrices.begin(); it != tileMatrixSet.tileMatrices.end(); it++)
+		{
+			const WmtsTileMatrix& tileMatrix = it->second;
+			const int zoomLevel = GetTileMatrixZoomLevel(tileMatrixSet, tileMatrix);
+			if (!IsZoomLevelAllowed(zoomLevel, minZoomLevel, maxZoomLevel))
+			{
+				continue;
+			}
+
+			const double currentResolution = tileMatrix.tres;
+			if (!std::isfinite(currentResolution) || currentResolution <= 0)
+			{
+				continue;
+			}
+
+			if (currentResolution < finestResolution)
+			{
+				finestResolution = currentResolution;
+				finestTileMatrix = &tileMatrix;
+			}
+
+			if (currentResolution > coarsestResolution)
+			{
+				coarsestResolution = currentResolution;
+				coarsestTileMatrix = &tileMatrix;
+			}
+
+			const double currentDelta = std::fabs(currentResolution - targetResolution);
+			if (currentDelta < nearestDelta)
+			{
+				nearestDelta = currentDelta;
+				nearestTileMatrix = &tileMatrix;
+			}
+
+			if (currentResolution <= targetResolution && currentResolution > bestNotCoarserResolution)
+			{
+				bestNotCoarserResolution = currentResolution;
+				notCoarserTileMatrix = &tileMatrix;
+			}
+
+			if (currentResolution >= targetResolution && currentResolution < bestNotFinerResolution)
+			{
+				bestNotFinerResolution = currentResolution;
+				notFinerTileMatrix = &tileMatrix;
+			}
+		}
+
+		switch (lodSelectMode)
+		{
+		case MapRenderTargetOptions::LodSelectMode::Nearest:
+			return nearestTileMatrix;
+		case MapRenderTargetOptions::LodSelectMode::NotCoarserThanTarget:
+			return notCoarserTileMatrix ? notCoarserTileMatrix : finestTileMatrix;
+		case MapRenderTargetOptions::LodSelectMode::NotFinerThanTarget:
+			return notFinerTileMatrix ? notFinerTileMatrix : coarsestTileMatrix;
+		default:
+			return nearestTileMatrix;
+		}
+	}
+
+	static bool TryCanonicalizeCrsDefinition(const std::string& crsDefinitionUtf8, std::string& outCanonicalWktUtf8)
+	{
+		outCanonicalWktUtf8.clear();
+
+		if (crsDefinitionUtf8.empty())
+		{
+			return false;
+		}
+
+		const std::shared_ptr<const GeoCrs> crs = GeoCrsManager::GetFromDefinitionCached(crsDefinitionUtf8);
+		if (!crs || !crs->IsValid())
+		{
+			return false;
+		}
+
+		outCanonicalWktUtf8 = crs->ExportToWktUtf8(GeoCrs::WktFormat::Wkt2_2018, false);
+		if (outCanonicalWktUtf8.empty())
+		{
+			outCanonicalWktUtf8 = crs->ExportToWktUtf8(GeoCrs::WktFormat::Default, false);
+		}
+
+		return !outCanonicalWktUtf8.empty();
+	}
+
+	static bool TryResolveOutputImageSize(const MapRenderTargetOptions& renderTarget, double bboxWidth, double bboxHeight, size_t inputWidth, size_t inputHeight, size_t& outWidth, size_t& outHeight)
+	{
+		outWidth = inputWidth;
+		outHeight = inputHeight;
+
+		if (!std::isfinite(bboxWidth) || !std::isfinite(bboxHeight) || bboxWidth <= 0 || bboxHeight <= 0)
+		{
+			return false;
+		}
+
+		if (outWidth == 0 && outHeight == 0)
+		{
+			return false;
+		}
+
+		if (renderTarget.keepAspectRatio)
+		{
+			if (outWidth == 0 && outHeight > 0)
+			{
+				const double widthValue = static_cast<double>(outHeight) * bboxWidth / bboxHeight;
+				outWidth = static_cast<size_t>(std::max<double>(1.0, std::llround(widthValue)));
+			}
+			else if (outHeight == 0 && outWidth > 0)
+			{
+				const double heightValue = static_cast<double>(outWidth) * bboxHeight / bboxWidth;
+				outHeight = static_cast<size_t>(std::max<double>(1.0, std::llround(heightValue)));
+			}
+		}
+
+		return outWidth > 0 && outHeight > 0;
+	}
+
+	static bool ResolveTargetResolution(const BuildVisibleMapRequestItemsInput& input, const std::string& targetCrsDefinitionUtf8, const GB_Rectangle& requestBoundingBox, const WmtsTileMatrixSet* tileMatrixSet, double& outTargetResolution, int& outRequestedZoomLevel)
+	{
+		outTargetResolution = 0;
+		outRequestedZoomLevel = -1;
+
+		if (!requestBoundingBox.IsValid())
+		{
+			return false;
+		}
+
+		const double bboxWidth = requestBoundingBox.Width();
+		const double bboxHeight = requestBoundingBox.Height();
+		if (!std::isfinite(bboxWidth) || !std::isfinite(bboxHeight) || bboxWidth <= 0 || bboxHeight <= 0)
+		{
+			return false;
+		}
+
+		MapRenderTargetOptions::ResolutionMode effectiveMode = input.renderTarget.resolutionMode;
+		if (effectiveMode == MapRenderTargetOptions::ResolutionMode::Auto)
+		{
+			if (input.renderTarget.outputImageWidth > 0 || input.renderTarget.outputImageHeight > 0)
+			{
+				effectiveMode = MapRenderTargetOptions::ResolutionMode::ByOutputImageSize;
+			}
+			else if (std::isfinite(input.renderTarget.targetResolution) && input.renderTarget.targetResolution > 0)
+			{
+				effectiveMode = MapRenderTargetOptions::ResolutionMode::ByResolution;
+			}
+			else if (std::isfinite(input.renderTarget.scaleDenominator) && input.renderTarget.scaleDenominator > 0)
+			{
+				effectiveMode = MapRenderTargetOptions::ResolutionMode::ByScaleDenominator;
+			}
+			else if (input.renderTarget.zoomLevel >= 0)
+			{
+				effectiveMode = MapRenderTargetOptions::ResolutionMode::ByZoomLevel;
+			}
+			else
+			{
+				return false;
+			}
+		}
+
+		switch (effectiveMode)
+		{
+		case MapRenderTargetOptions::ResolutionMode::ByZoomLevel:
+		{
+			if (!tileMatrixSet)
+			{
+				return false;
+			}
+
+			const WmtsTileMatrix* tileMatrix = FindTileMatrixByZoomLevel(*tileMatrixSet, input.renderTarget.zoomLevel, input.minZoomLevel, input.maxZoomLevel);
+			if (!tileMatrix || !std::isfinite(tileMatrix->tres) || tileMatrix->tres <= 0)
+			{
+				return false;
+			}
+
+			outTargetResolution = tileMatrix->tres;
+			outRequestedZoomLevel = GetTileMatrixZoomLevel(*tileMatrixSet, *tileMatrix);
+			return outRequestedZoomLevel >= 0 && outTargetResolution > 0;
+		}
+
+		case MapRenderTargetOptions::ResolutionMode::ByResolution:
+			if (!std::isfinite(input.renderTarget.targetResolution) || input.renderTarget.targetResolution <= 0)
+			{
+				return false;
+			}
+			outTargetResolution = input.renderTarget.targetResolution;
+			return true;
+
+		case MapRenderTargetOptions::ResolutionMode::ByScaleDenominator:
+		{
+			if (!std::isfinite(input.renderTarget.scaleDenominator) || input.renderTarget.scaleDenominator <= 0)
+			{
+				return false;
+			}
+
+			const std::shared_ptr<const GeoCrs> targetCrs = GeoCrsManager::GetFromDefinitionCached(targetCrsDefinitionUtf8);
+			if (!targetCrs || !targetCrs->IsValid())
+			{
+				return false;
+			}
+
+			const double metersPerUnit = targetCrs->GetMetersPerUnit();
+			if (!std::isfinite(metersPerUnit) || metersPerUnit <= 0)
+			{
+				return false;
+			}
+
+			double renderingPixelSizeMeters = input.renderTarget.renderingPixelSizeMeters;
+			if (!std::isfinite(renderingPixelSizeMeters) || renderingPixelSizeMeters <= 0)
+			{
+				renderingPixelSizeMeters = standardRenderingPixelSize;
+			}
+
+			outTargetResolution = input.renderTarget.scaleDenominator * renderingPixelSizeMeters / metersPerUnit;
+			return std::isfinite(outTargetResolution) && outTargetResolution > 0;
+		}
+
+		case MapRenderTargetOptions::ResolutionMode::ByOutputImageSize:
+		{
+			size_t outputImageWidth = 0;
+			size_t outputImageHeight = 0;
+			if (!TryResolveOutputImageSize(input.renderTarget, bboxWidth, bboxHeight, input.renderTarget.outputImageWidth, input.renderTarget.outputImageHeight, outputImageWidth, outputImageHeight))
+			{
+				return false;
+			}
+
+			const double resolutionX = bboxWidth / static_cast<double>(outputImageWidth);
+			const double resolutionY = bboxHeight / static_cast<double>(outputImageHeight);
+			outTargetResolution = std::max(resolutionX, resolutionY);
+			return std::isfinite(outTargetResolution) && outTargetResolution > 0;
+		}
+
+		case MapRenderTargetOptions::ResolutionMode::Auto:
+			return false;
+		}
+
+		return false;
+	}
+
+	static bool ComputeWmsImageSize(const BuildVisibleMapRequestItemsInput& input, const WmsLayerProperty& wmsLayer, const GB_Rectangle& requestBoundingBox, double targetResolution, size_t serviceMaxWidth, size_t serviceMaxHeight, size_t& outWidth, size_t& outHeight)
+	{
+		outWidth = 0;
+		outHeight = 0;
+
+		if (!requestBoundingBox.IsValid())
+		{
+			return false;
+		}
+
+		const double bboxWidth = requestBoundingBox.Width();
+		const double bboxHeight = requestBoundingBox.Height();
+		if (!std::isfinite(bboxWidth) || !std::isfinite(bboxHeight) || bboxWidth <= 0 || bboxHeight <= 0)
+		{
+			return false;
+		}
+
+		size_t width = 0;
+		size_t height = 0;
+		switch (input.renderTarget.wmsImageSizeMode)
+		{
+		case MapRenderTargetOptions::WmsImageSizeMode::ByResolution:
+			if (!std::isfinite(targetResolution) || targetResolution <= 0)
+			{
+				return false;
+			}
+			width = static_cast<size_t>(std::max<double>(1.0, std::ceil(bboxWidth / targetResolution)));
+			height = static_cast<size_t>(std::max<double>(1.0, std::ceil(bboxHeight / targetResolution)));
+			break;
+
+		case MapRenderTargetOptions::WmsImageSizeMode::ExactWidthHeight:
+			if (!TryResolveOutputImageSize(input.renderTarget, bboxWidth, bboxHeight, input.renderTarget.outputImageWidth, input.renderTarget.outputImageHeight, width, height))
+			{
+				return false;
+			}
+			break;
+
+		case MapRenderTargetOptions::WmsImageSizeMode::FixedLongEdge:
+			if (input.renderTarget.longEdgePixels == 0)
+			{
+				return false;
+			}
+			if (bboxWidth >= bboxHeight)
+			{
+				width = input.renderTarget.longEdgePixels;
+				height = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(width) * bboxHeight / bboxWidth)));
+			}
+			else
+			{
+				height = input.renderTarget.longEdgePixels;
+				width = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(height) * bboxWidth / bboxHeight)));
+			}
+			break;
+
+		case MapRenderTargetOptions::WmsImageSizeMode::FitWithinMaxSize:
+		{
+			const size_t maxOutputImageWidth = input.renderTarget.maxOutputImageWidth;
+			const size_t maxOutputImageHeight = input.renderTarget.maxOutputImageHeight;
+			if (maxOutputImageWidth == 0 && maxOutputImageHeight == 0)
+			{
+				return false;
+			}
+
+			if (!input.renderTarget.keepAspectRatio)
+			{
+				width = std::max<size_t>(1, maxOutputImageWidth);
+				height = std::max<size_t>(1, maxOutputImageHeight);
+				break;
+			}
+
+			if (maxOutputImageWidth == 0)
+			{
+				height = std::max<size_t>(1, maxOutputImageHeight);
+				width = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(height) * bboxWidth / bboxHeight)));
+				break;
+			}
+
+			if (maxOutputImageHeight == 0)
+			{
+				width = std::max<size_t>(1, maxOutputImageWidth);
+				height = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(width) * bboxHeight / bboxWidth)));
+				break;
+			}
+
+			width = std::max<size_t>(1, maxOutputImageWidth);
+			height = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(width) * bboxHeight / bboxWidth)));
+			if (height > maxOutputImageHeight)
+			{
+				height = std::max<size_t>(1, maxOutputImageHeight);
+				width = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(height) * bboxWidth / bboxHeight)));
+			}
+			break;
+		}
+		default:
+			return false;
+		}
+
+		if (wmsLayer.fixedWidth > 0 && wmsLayer.fixedHeight > 0)
+		{
+			width = static_cast<size_t>(wmsLayer.fixedWidth);
+			height = static_cast<size_t>(wmsLayer.fixedHeight);
+		}
+		else if (wmsLayer.fixedWidth > 0)
+		{
+			width = static_cast<size_t>(wmsLayer.fixedWidth);
+			if (input.renderTarget.keepAspectRatio)
+			{
+				height = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(width) * bboxHeight / bboxWidth)));
+			}
+		}
+		else if (wmsLayer.fixedHeight > 0)
+		{
+			height = static_cast<size_t>(wmsLayer.fixedHeight);
+			if (input.renderTarget.keepAspectRatio)
+			{
+				width = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(height) * bboxWidth / bboxHeight)));
+			}
+		}
+
+		if (serviceMaxWidth > 0 && width > serviceMaxWidth)
+		{
+			if (input.renderTarget.keepAspectRatio)
+			{
+				const double scale = static_cast<double>(serviceMaxWidth) / static_cast<double>(width);
+				width = serviceMaxWidth;
+				height = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(height) * scale)));
+			}
+			else
+			{
+				width = serviceMaxWidth;
+			}
+		}
+
+		if (serviceMaxHeight > 0 && height > serviceMaxHeight)
+		{
+			if (input.renderTarget.keepAspectRatio)
+			{
+				const double scale = static_cast<double>(serviceMaxHeight) / static_cast<double>(height);
+				height = serviceMaxHeight;
+				width = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(width) * scale)));
+			}
+			else
+			{
+				height = serviceMaxHeight;
+			}
+		}
+
+		outWidth = std::max<size_t>(1, width);
+		outHeight = std::max<size_t>(1, height);
+		return true;
+	}
+
+
+	enum class PolygonRectangleCoverageRelation
+	{
+		Outside = 0,
+		Partial,
+		Full
+	};
+
+	static bool IsFinitePoint2d(const GB_Point2d& point)
+	{
+		return std::isfinite(point.x) && std::isfinite(point.y);
+	}
+
+	static bool IsFiniteRectangle(const GB_Rectangle& rectangle)
+	{
+		return std::isfinite(rectangle.minX) && std::isfinite(rectangle.minY) && std::isfinite(rectangle.maxX) && std::isfinite(rectangle.maxY);
+	}
+
+	static bool TryGetPolygonBoundingBox(const GB_Polygon& polygon, GB_Rectangle& outBoundingBox)
+	{
+		outBoundingBox.Reset();
+		if (!polygon.IsValid())
+		{
+			return false;
+		}
+
+		outBoundingBox = polygon.GetBoundingBox();
+		return outBoundingBox.IsValid() && IsFiniteRectangle(outBoundingBox);
+	}
+
+	static void RemoveDuplicateAdjacentVertices(std::vector<GB_Point2d>& vertices)
+	{
+		if (vertices.empty())
+		{
+			return;
+		}
+
+		std::vector<GB_Point2d> uniqueVertices;
+		uniqueVertices.reserve(vertices.size());
+		for (size_t i = 0; i < vertices.size(); i++)
+		{
+			const GB_Point2d& vertex = vertices[i];
+			if (!IsFinitePoint2d(vertex))
+			{
+				continue;
+			}
+
+			if (!uniqueVertices.empty())
+			{
+				const GB_Point2d& lastVertex = uniqueVertices.back();
+				if (vertex.x == lastVertex.x && vertex.y == lastVertex.y)
+				{
+					continue;
+				}
+			}
+			uniqueVertices.push_back(vertex);
+		}
+
+		if (uniqueVertices.size() >= 2)
+		{
+			const GB_Point2d& firstVertex = uniqueVertices.front();
+			const GB_Point2d& lastVertex = uniqueVertices.back();
+			if (firstVertex.x == lastVertex.x && firstVertex.y == lastVertex.y)
+			{
+				uniqueVertices.pop_back();
+			}
+		}
+
+		vertices.swap(uniqueVertices);
+	}
+
+	static double ComputePolygonAreaFromVertices(const std::vector<GB_Point2d>& vertices)
+	{
+		if (vertices.size() < 3)
+		{
+			return 0.0;
+		}
+
+		long double signedAreaTwice = 0.0L;
+		for (size_t i = 0; i < vertices.size(); i++)
+		{
+			const GB_Point2d& currentVertex = vertices[i];
+			const GB_Point2d& nextVertex = vertices[(i + 1) % vertices.size()];
+			if (!IsFinitePoint2d(currentVertex) || !IsFinitePoint2d(nextVertex))
+			{
+				return 0.0;
+			}
+			signedAreaTwice += static_cast<long double>(currentVertex.x) * static_cast<long double>(nextVertex.y) -
+				static_cast<long double>(nextVertex.x) * static_cast<long double>(currentVertex.y);
+		}
+
+		const long double area = std::fabs(signedAreaTwice) * 0.5L;
+		return std::isfinite(static_cast<double>(area)) ? static_cast<double>(area) : 0.0;
+	}
+
+	static bool IsInsideLeftBoundary(const GB_Point2d& point, double boundaryValue)
+	{
+		return point.x >= boundaryValue;
+	}
+
+	static bool IsInsideRightBoundary(const GB_Point2d& point, double boundaryValue)
+	{
+		return point.x <= boundaryValue;
+	}
+
+	static bool IsInsideBottomBoundary(const GB_Point2d& point, double boundaryValue)
+	{
+		return point.y >= boundaryValue;
+	}
+
+	static bool IsInsideTopBoundary(const GB_Point2d& point, double boundaryValue)
+	{
+		return point.y <= boundaryValue;
+	}
+
+	static GB_Point2d IntersectSegmentWithVerticalBoundary(const GB_Point2d& startPoint, const GB_Point2d& endPoint, double boundaryX)
+	{
+		const double dx = endPoint.x - startPoint.x;
+		if (!std::isfinite(dx) || dx == 0.0)
+		{
+			return GB_Point2d(boundaryX, startPoint.y);
+		}
+
+		const double t = (boundaryX - startPoint.x) / dx;
+		const double y = startPoint.y + (endPoint.y - startPoint.y) * t;
+		return GB_Point2d(boundaryX, y);
+	}
+
+	static GB_Point2d IntersectSegmentWithHorizontalBoundary(const GB_Point2d& startPoint, const GB_Point2d& endPoint, double boundaryY)
+	{
+		const double dy = endPoint.y - startPoint.y;
+		if (!std::isfinite(dy) || dy == 0.0)
+		{
+			return GB_Point2d(startPoint.x, boundaryY);
+		}
+
+		const double t = (boundaryY - startPoint.y) / dy;
+		const double x = startPoint.x + (endPoint.x - startPoint.x) * t;
+		return GB_Point2d(x, boundaryY);
+	}
+
+	static void ClipPolygonWithBoundary(
+		const std::vector<GB_Point2d>& inputVertices,
+		std::vector<GB_Point2d>& outputVertices,
+		bool (*isInside)(const GB_Point2d&, double),
+		GB_Point2d(*computeIntersection)(const GB_Point2d&, const GB_Point2d&, double),
+		double boundaryValue)
+	{
+		outputVertices.clear();
+		if (inputVertices.empty())
+		{
+			return;
+		}
+
+		GB_Point2d previousVertex = inputVertices.back();
+		bool previousInside = isInside(previousVertex, boundaryValue);
+		for (size_t i = 0; i < inputVertices.size(); i++)
+		{
+			const GB_Point2d& currentVertex = inputVertices[i];
+			const bool currentInside = isInside(currentVertex, boundaryValue);
+			if (currentInside)
+			{
+				if (!previousInside)
+				{
+					outputVertices.push_back(computeIntersection(previousVertex, currentVertex, boundaryValue));
+				}
+				outputVertices.push_back(currentVertex);
+			}
+			else if (previousInside)
+			{
+				outputVertices.push_back(computeIntersection(previousVertex, currentVertex, boundaryValue));
+			}
+
+			previousVertex = currentVertex;
+			previousInside = currentInside;
+		}
+
+		RemoveDuplicateAdjacentVertices(outputVertices);
+	}
+
+	static bool TryClipPolygonToRectangle(const GB_Polygon& polygon, const GB_Rectangle& rectangle, std::vector<GB_Point2d>& outVertices)
+	{
+		outVertices.clear();
+		if (!polygon.IsValid() || !rectangle.IsValid())
+		{
+			return false;
+		}
+
+		std::vector<GB_Point2d> workingVertices = polygon.GetVerticesAsDouble();
+		RemoveDuplicateAdjacentVertices(workingVertices);
+		if (workingVertices.size() < 3)
+		{
+			return false;
+		}
+
+		std::vector<GB_Point2d> clippedVertices;
+		ClipPolygonWithBoundary(workingVertices, clippedVertices, IsInsideLeftBoundary, IntersectSegmentWithVerticalBoundary, rectangle.minX);
+		if (clippedVertices.size() < 3)
+		{
+			return true;
+		}
+
+		ClipPolygonWithBoundary(clippedVertices, workingVertices, IsInsideRightBoundary, IntersectSegmentWithVerticalBoundary, rectangle.maxX);
+		if (workingVertices.size() < 3)
+		{
+			return true;
+		}
+
+		ClipPolygonWithBoundary(workingVertices, clippedVertices, IsInsideBottomBoundary, IntersectSegmentWithHorizontalBoundary, rectangle.minY);
+		if (clippedVertices.size() < 3)
+		{
+			return true;
+		}
+
+		ClipPolygonWithBoundary(clippedVertices, workingVertices, IsInsideTopBoundary, IntersectSegmentWithHorizontalBoundary, rectangle.maxY);
+		RemoveDuplicateAdjacentVertices(workingVertices);
+		outVertices.swap(workingVertices);
+		return true;
+	}
+
+	static double ComputePolygonRegionsNetArea(const std::vector<GB_Polygon>& outerAreas, const std::vector<std::vector<GB_Polygon>>& holeAreas)
+	{
+		double totalArea = 0.0;
+		for (size_t outerIndex = 0; outerIndex < outerAreas.size(); outerIndex++)
+		{
+			const double outerArea = outerAreas[outerIndex].GetUnsignedArea();
+			if (std::isfinite(outerArea) && outerArea > 0.0)
+			{
+				totalArea += outerArea;
+			}
+
+			if (outerIndex < holeAreas.size())
+			{
+				for (size_t holeIndex = 0; holeIndex < holeAreas[outerIndex].size(); holeIndex++)
+				{
+					const double holeArea = holeAreas[outerIndex][holeIndex].GetUnsignedArea();
+					if (std::isfinite(holeArea) && holeArea > 0.0)
+					{
+						totalArea -= holeArea;
+					}
+				}
+			}
+		}
+
+		return totalArea;
+	}
+
+	static PolygonRectangleCoverageRelation ClassifyPolygonRectangleCoverage(const GB_Polygon& polygon, const GB_Rectangle& rectangle)
+	{
+		if (!polygon.IsValid() || !rectangle.IsValid())
+		{
+			return PolygonRectangleCoverageRelation::Outside;
+		}
+
+		const GB_Rectangle polygonBoundingBox = polygon.GetBoundingBox();
+		if (!polygonBoundingBox.IsValid())
+		{
+			return PolygonRectangleCoverageRelation::Outside;
+		}
+
+		const GB_Rectangle intersectionBoundingBox = polygonBoundingBox.Intersected(rectangle);
+		if (!intersectionBoundingBox.IsValid())
+		{
+			return PolygonRectangleCoverageRelation::Outside;
+		}
+
+		const double bboxIntersectionArea = intersectionBoundingBox.Area();
+		if (!std::isfinite(bboxIntersectionArea) || bboxIntersectionArea <= 0.0)
+		{
+			return PolygonRectangleCoverageRelation::Outside;
+		}
+
+		const double rectangleArea = rectangle.Area();
+		if (!std::isfinite(rectangleArea) || rectangleArea <= 0.0)
+		{
+			return PolygonRectangleCoverageRelation::Outside;
+		}
+
+		const double fullCoverageTolerance = std::max(1e-12 * rectangleArea, 1e-9);
+		std::vector<GB_Polygon> intersectionAreas;
+		std::vector<std::vector<GB_Polygon>> holeAreas;
+		if (polygon.ComputeIntersection(GB_Polygon(rectangle), intersectionAreas, holeAreas))
+		{
+			const double totalIntersectionArea = ComputePolygonRegionsNetArea(intersectionAreas, holeAreas);
+			if (!std::isfinite(totalIntersectionArea) || totalIntersectionArea <= fullCoverageTolerance)
+			{
+				return PolygonRectangleCoverageRelation::Outside;
+			}
+
+			if (std::fabs(totalIntersectionArea - rectangleArea) <= fullCoverageTolerance)
+			{
+				return PolygonRectangleCoverageRelation::Full;
+			}
+
+			return PolygonRectangleCoverageRelation::Partial;
+		}
+
+		std::vector<GB_Point2d> clippedVertices;
+		if (!TryClipPolygonToRectangle(polygon, rectangle, clippedVertices))
+		{
+			return PolygonRectangleCoverageRelation::Outside;
+		}
+
+		const double clippedArea = ComputePolygonAreaFromVertices(clippedVertices);
+		if (!std::isfinite(clippedArea) || clippedArea <= fullCoverageTolerance)
+		{
+			return PolygonRectangleCoverageRelation::Outside;
+		}
+
+		if (std::fabs(clippedArea - rectangleArea) <= fullCoverageTolerance)
+		{
+			return PolygonRectangleCoverageRelation::Full;
+		}
+
+		return PolygonRectangleCoverageRelation::Partial;
+	}
+
+	static bool TryMergeAdjacentRectangles(std::vector<GB_Rectangle>& rectangles)
+	{
+		if (rectangles.size() < 2)
+		{
+			return false;
+		}
+
+		const auto nearlyEqual = [](double left, double right) -> bool
+			{
+				const double tolerance = std::max(1e-12 * std::max(std::fabs(left), std::fabs(right)), 1e-9);
+				return std::fabs(left - right) <= tolerance;
+			};
+
+		bool mergedAny = false;
+
+		std::sort(rectangles.begin(), rectangles.end(), [&](const GB_Rectangle& left, const GB_Rectangle& right)
+			{
+				if (!nearlyEqual(left.minY, right.minY))
+				{
+					return left.minY < right.minY;
+				}
+				if (!nearlyEqual(left.maxY, right.maxY))
+				{
+					return left.maxY < right.maxY;
+				}
+				if (!nearlyEqual(left.minX, right.minX))
+				{
+					return left.minX < right.minX;
+				}
+				return left.maxX < right.maxX;
+			});
+
+		std::vector<GB_Rectangle> horizontallyMerged;
+		horizontallyMerged.reserve(rectangles.size());
+		for (size_t i = 0; i < rectangles.size(); i++)
+		{
+			GB_Rectangle currentRectangle = rectangles[i];
+			if (!currentRectangle.IsValid())
+			{
+				continue;
+			}
+
+			while (i + 1 < rectangles.size())
+			{
+				const GB_Rectangle& nextRectangle = rectangles[i + 1];
+				if (!nextRectangle.IsValid() ||
+					!nearlyEqual(currentRectangle.minY, nextRectangle.minY) ||
+					!nearlyEqual(currentRectangle.maxY, nextRectangle.maxY) ||
+					!nearlyEqual(currentRectangle.maxX, nextRectangle.minX))
+				{
+					break;
+				}
+
+				currentRectangle.maxX = nextRectangle.maxX;
+				mergedAny = true;
+				i++;
+			}
+
+			horizontallyMerged.push_back(currentRectangle);
+		}
+
+		std::sort(horizontallyMerged.begin(), horizontallyMerged.end(), [&](const GB_Rectangle& left, const GB_Rectangle& right)
+			{
+				if (!nearlyEqual(left.minX, right.minX))
+				{
+					return left.minX < right.minX;
+				}
+				if (!nearlyEqual(left.maxX, right.maxX))
+				{
+					return left.maxX < right.maxX;
+				}
+				if (!nearlyEqual(left.minY, right.minY))
+				{
+					return left.minY < right.minY;
+				}
+				return left.maxY < right.maxY;
+			});
+
+		std::vector<GB_Rectangle> verticallyMerged;
+		verticallyMerged.reserve(horizontallyMerged.size());
+		for (size_t i = 0; i < horizontallyMerged.size(); i++)
+		{
+			GB_Rectangle currentRectangle = horizontallyMerged[i];
+			if (!currentRectangle.IsValid())
+			{
+				continue;
+			}
+
+			while (i + 1 < horizontallyMerged.size())
+			{
+				const GB_Rectangle& nextRectangle = horizontallyMerged[i + 1];
+				if (!nextRectangle.IsValid() ||
+					!nearlyEqual(currentRectangle.minX, nextRectangle.minX) ||
+					!nearlyEqual(currentRectangle.maxX, nextRectangle.maxX) ||
+					!nearlyEqual(currentRectangle.maxY, nextRectangle.minY))
+				{
+					break;
+				}
+
+				currentRectangle.maxY = nextRectangle.maxY;
+				mergedAny = true;
+				i++;
+			}
+
+			verticallyMerged.push_back(currentRectangle);
+		}
+
+		rectangles.swap(verticallyMerged);
+		return mergedAny;
+	}
+
+	static void BuildAdaptivePolygonRequestRectangles(const GB_Polygon& polygon, const GB_Rectangle& polygonBoundingBox, double targetResolution, std::vector<GB_Rectangle>& outRectangles)
+	{
+		outRectangles.clear();
+		if (!polygon.IsValid() || !polygonBoundingBox.IsValid())
+		{
+			return;
+		}
+
+		const double polygonArea = polygonBoundingBox.Area();
+		if (!std::isfinite(polygonArea) || polygonArea <= 0.0 || !std::isfinite(targetResolution) || targetResolution <= 0.0)
+		{
+			return;
+		}
+
+		constexpr double minBoundaryPixels = 128.0;
+		std::deque<GB_Rectangle> pendingRectangles;
+		pendingRectangles.push_back(polygonBoundingBox);
+
+		while (!pendingRectangles.empty())
+		{
+			const GB_Rectangle currentRectangle = pendingRectangles.front();
+			pendingRectangles.pop_front();
+			if (!currentRectangle.IsValid())
+			{
+				continue;
+			}
+
+			const PolygonRectangleCoverageRelation coverageRelation = ClassifyPolygonRectangleCoverage(polygon, currentRectangle);
+			if (coverageRelation == PolygonRectangleCoverageRelation::Outside)
+			{
+				continue;
+			}
+
+			const double pixelWidth = currentRectangle.Width() / targetResolution;
+			const double pixelHeight = currentRectangle.Height() / targetResolution;
+			const bool isSmallEnough =
+				(std::isfinite(pixelWidth) && pixelWidth <= minBoundaryPixels) ||
+				(std::isfinite(pixelHeight) && pixelHeight <= minBoundaryPixels);
+
+			if (coverageRelation == PolygonRectangleCoverageRelation::Full || isSmallEnough)
+			{
+				outRectangles.push_back(currentRectangle);
+				continue;
+			}
+
+			const double centerX = 0.5 * (currentRectangle.minX + currentRectangle.maxX);
+			const double centerY = 0.5 * (currentRectangle.minY + currentRectangle.maxY);
+			if (!std::isfinite(centerX) || !std::isfinite(centerY) ||
+				centerX <= currentRectangle.minX || centerX >= currentRectangle.maxX ||
+				centerY <= currentRectangle.minY || centerY >= currentRectangle.maxY)
+			{
+				outRectangles.push_back(currentRectangle);
+				continue;
+			}
+
+			pendingRectangles.push_back(GB_Rectangle(currentRectangle.minX, currentRectangle.minY, centerX, centerY));
+			pendingRectangles.push_back(GB_Rectangle(centerX, currentRectangle.minY, currentRectangle.maxX, centerY));
+			pendingRectangles.push_back(GB_Rectangle(currentRectangle.minX, centerY, centerX, currentRectangle.maxY));
+			pendingRectangles.push_back(GB_Rectangle(centerX, centerY, currentRectangle.maxX, currentRectangle.maxY));
+		}
+
+		while (TryMergeAdjacentRectangles(outRectangles))
+		{
+		}
+	}
+
+	static std::string ReplaceAllText(const std::string& text, const std::string& oldValue, const std::string& newValue)
+	{
+		if (oldValue.empty())
+		{
+			return text;
+		}
+
+		std::string result = text;
+		size_t startPosition = 0;
+		while (true)
+		{
+			const size_t foundPosition = result.find(oldValue, startPosition);
+			if (foundPosition == std::string::npos)
+			{
+				break;
+			}
+
+			result.replace(foundPosition, oldValue.size(), newValue);
+			startPosition = foundPosition + newValue.size();
+		}
+		return result;
+	}
+
+	static std::string GetDefaultDimensionValue(const WmtsDimension& dimension)
+	{
+		if (!dimension.defaultValueUtf8.empty())
+		{
+			return dimension.defaultValueUtf8;
+		}
+		return dimension.values.empty() ? "" : dimension.values[0];
+	}
+
+	static std::string BuildWmtsRestfulUrl(const WmtsTileLayer& tileLayer, const std::string& formatName, const std::string& styleName, const std::string& tileMatrixSetName, const WmtsTileMatrix& tileMatrix, int tileRow, int tileCol)
+	{
+		auto templateIterator = tileLayer.getTileUrls.find(formatName);
+		if (templateIterator == tileLayer.getTileUrls.end() || templateIterator->second.empty())
+		{
+			return "";
+		}
+
+		std::string urlUtf8 = templateIterator->second;
+		const std::vector<GB_UrlOperator::UrlKeyValue> urlKeyValues = {
+			GB_UrlOperator::UrlKeyValue("Layer", tileLayer.identifierUtf8),
+			GB_UrlOperator::UrlKeyValue("Style", styleName),
+			GB_UrlOperator::UrlKeyValue("TileMatrixSet", tileMatrixSetName),
+			GB_UrlOperator::UrlKeyValue("TileMatrix", tileMatrix.identifierUtf8),
+			GB_UrlOperator::UrlKeyValue("TileRow", std::to_string(tileRow)),
+			GB_UrlOperator::UrlKeyValue("TileCol", std::to_string(tileCol)),
+			GB_UrlOperator::UrlKeyValue("Format", formatName)
+		};
+		urlUtf8 = GB_UrlOperator::ReplaceUrlPathParams(urlUtf8, urlKeyValues);
+
+		for (auto it = tileLayer.dimensions.begin(); it != tileLayer.dimensions.end(); it++)
+		{
+			const std::string dimensionValue = GetDefaultDimensionValue(it->second);
+			if (dimensionValue.empty())
+			{
+				continue;
+			}
+
+			urlUtf8 = ReplaceAllText(urlUtf8, "{" + it->second.identifierUtf8 + "}", dimensionValue);
+			urlUtf8 = ReplaceAllText(urlUtf8, "{" + it->first + "}", dimensionValue);
+		}
+
+		return urlUtf8;
+	}
+
+	static std::string GetFirstHttpGetUrl(const std::vector<WmsDcpTypeProperty>& dcpTypes)
+	{
+		for (size_t i = 0; i < dcpTypes.size(); i++)
+		{
+			const std::string& urlUtf8 = dcpTypes[i].http.get.onlineResource.xlinkHrefUtf8;
+			if (!urlUtf8.empty())
+			{
+				return urlUtf8;
+			}
+		}
+		return "";
+	}
+
+	static std::string BuildWmtsKvpUrl(const BuildVisibleMapRequestItemsInput& input, const WmtsTileLayer& tileLayer, const std::string& styleName, const std::string& tileMatrixSetName, const std::string& formatName, const WmtsTileMatrix& tileMatrix, int tileRow, int tileCol)
+	{
+		std::string urlUtf8 = GetFirstHttpGetUrl(input.capabilities->capability.request.getTile.dcpTypes);
+		if (urlUtf8.empty())
+		{
+			urlUtf8 = input.mapServiceUrlUtf8;
+		}
+		if (urlUtf8.empty())
+		{
+			return "";
+		}
+
+		const std::string versionUtf8 = input.capabilities->versionUtf8.empty() ? "1.0.0" : input.capabilities->versionUtf8;
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "SERVICE", "WMTS");
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "REQUEST", "GetTile");
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "VERSION", versionUtf8);
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "LAYER", tileLayer.identifierUtf8);
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "STYLE", styleName);
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "TILEMATRIXSET", tileMatrixSetName);
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "TILEMATRIX", tileMatrix.identifierUtf8);
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "TILEROW", std::to_string(tileRow));
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "TILECOL", std::to_string(tileCol));
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "FORMAT", formatName);
+
+		for (auto it = tileLayer.dimensions.begin(); it != tileLayer.dimensions.end(); it++)
+		{
+			const std::string dimensionValue = GetDefaultDimensionValue(it->second);
+			if (!dimensionValue.empty())
+			{
+				urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, it->second.identifierUtf8, dimensionValue);
+			}
+		}
+
+		return urlUtf8;
+	}
+
+	static std::string BuildWmsGetMapUrl(const BuildVisibleMapRequestItemsInput& input, const WmsLayerProperty& wmsLayer, const std::string& styleName, const std::string& crsDefinitionUtf8, const std::string& formatName, const GB_Rectangle& requestBoundingBox, size_t imageWidth, size_t imageHeight)
+	{
+		std::string urlUtf8 = GetFirstHttpGetUrl(input.capabilities->capability.request.getMap.dcpTypes);
+		if (urlUtf8.empty())
+		{
+			urlUtf8 = input.mapServiceUrlUtf8;
+		}
+		if (urlUtf8.empty())
+		{
+			return "";
+		}
+
+		const std::string versionUtf8 = input.capabilities->versionUtf8.empty() ? "1.3.0" : input.capabilities->versionUtf8;
+		const bool isWms130OrLater = GB_Utf8StartsWith(versionUtf8, "1.3", true) || GB_Utf8StartsWith(versionUtf8, "2.", true);
+		const std::string crsParameterName = isWms130OrLater ? "CRS" : "SRS";
+
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "SERVICE", "WMS");
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "REQUEST", "GetMap");
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "VERSION", versionUtf8);
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "LAYERS", wmsLayer.nameUtf8);
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "STYLES", styleName);
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, crsParameterName, crsDefinitionUtf8);
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "FORMAT", formatName);
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "WIDTH", std::to_string(imageWidth));
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "HEIGHT", std::to_string(imageHeight));
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "BBOX", BuildRectangleBboxText(requestBoundingBox));
+
+		for (size_t i = 0; i < wmsLayer.dimensions.size(); i++)
+		{
+			const WmsDimensionProperty& dimension = wmsLayer.dimensions[i];
+			if (!dimension.nameUtf8.empty() && !dimension.defaultValueUtf8.empty())
+			{
+				urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, dimension.nameUtf8, dimension.defaultValueUtf8);
+			}
+		}
+
+		return urlUtf8;
 	}
 }
 
@@ -3217,7 +4392,7 @@ namespace
 			const std::string& dcpType = capabilities.capability.request.getTile.dcpTypes[0].http.get.onlineResource.xlinkHrefUtf8;
 			return GB_Utf8Find(dcpType, GB_STR("tianditu"), false) > 0;
 		}
-		
+
 		bool DetectTileLayerBoundingBox(WmtsTileLayer& tileLayer)
 		{
 			if (tileLayer.setLinks.empty())
@@ -3393,13 +4568,14 @@ namespace
 		{
 			WmsTreeNode formatNode;
 			formatNode.textUtf8 = format;
+			formatNode.nameUtf8 = format;
 			formatNode.nodeType = WmsTreeNode::NodeType::Format;
 			formatNode.uidUtf8 = GB_Md5Hash(path + "|" + format);
 			formatNodes.push_back(std::move(formatNode));
 		}
 		std::sort(formatNodes.begin(), formatNodes.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
 			return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
-		});
+			});
 		return formatNodes;
 	}
 
@@ -3411,6 +4587,7 @@ namespace
 		{
 			WmsTreeNode tileMatrixSetNode;
 			tileMatrixSetNode.textUtf8 = kvp.first;
+			tileMatrixSetNode.nameUtf8 = kvp.first;
 			tileMatrixSetNode.nodeType = WmsTreeNode::NodeType::WmtsTileMatrixSet;
 
 			const std::string currentPath = path + "|" + kvp.first;
@@ -3423,7 +4600,7 @@ namespace
 		}
 		std::sort(tileMatrixSetNodes.begin(), tileMatrixSetNodes.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
 			return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
-		});
+			});
 		return tileMatrixSetNodes;
 	}
 
@@ -3436,6 +4613,7 @@ namespace
 			const WmtsStyle& style = kvp.second;
 			WmsTreeNode styleNode;
 			styleNode.textUtf8 = style.titleUtf8.empty() ? style.identifierUtf8 : style.titleUtf8;
+			styleNode.nameUtf8 = style.identifierUtf8;
 			styleNode.nodeType = WmsTreeNode::NodeType::Style;
 
 			const std::string currentPath = path + "|" + kvp.first;
@@ -3459,7 +4637,7 @@ namespace
 		}
 		std::sort(styleNodes.begin(), styleNodes.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
 			return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
-		});
+			});
 		return styleNodes;
 	}
 
@@ -3467,6 +4645,7 @@ namespace
 	{
 		WmsTreeNode layerNode;
 		layerNode.textUtf8 = tileLayer.titleUtf8.empty() ? tileLayer.identifierUtf8 : tileLayer.titleUtf8;
+		layerNode.nameUtf8 = tileLayer.identifierUtf8;
 		layerNode.nodeType = WmsTreeNode::NodeType::Layer;
 
 		const std::string currentPath = path + "|" + tileLayer.identifierUtf8;
@@ -3493,7 +4672,7 @@ namespace
 		}
 		std::sort(layerNode.children.begin(), layerNode.children.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
 			return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
-		});
+			});
 		return layerNode;
 	}
 
@@ -3501,6 +4680,7 @@ namespace
 	{
 		WmsTreeNode layerNode;
 		layerNode.textUtf8 = layer.titleUtf8.empty() ? (layer.nameUtf8.empty() ? std::to_string(layer.orderId) : layer.nameUtf8) : layer.titleUtf8;
+		layerNode.nameUtf8 = layer.nameUtf8.empty() ? std::to_string(layer.orderId) : layer.nameUtf8;
 		layerNode.nodeType = WmsTreeNode::NodeType::Layer;
 		const std::string currentPath = path + "|" + (layer.nameUtf8.empty() ? std::to_string(layer.orderId) : layer.nameUtf8);
 		layerNode.uidUtf8 = GB_Md5Hash(currentPath);
@@ -3513,7 +4693,7 @@ namespace
 		}
 		std::sort(layerNode.children.begin(), layerNode.children.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
 			return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
-		});
+			});
 		return layerNode;
 	}
 }
@@ -3522,6 +4702,7 @@ bool BuildWmsLayerTree(const WmsCapabilitiesProperty& capabilities, WmsTreeNode&
 {
 	rootNode = WmsTreeNode();
 	rootNode.textUtf8 = capabilities.service.titleUtf8;
+	rootNode.nameUtf8 = "root";
 	rootNode.nodeType = WmsTreeNode::NodeType::Root;
 
 	const std::string currentPath = (rootNode.textUtf8.empty() ? GB_STR("root") : rootNode.textUtf8);
@@ -3544,7 +4725,7 @@ bool BuildWmsLayerTree(const WmsCapabilitiesProperty& capabilities, WmsTreeNode&
 
 	std::sort(rootNode.children.begin(), rootNode.children.end(), [](const WmsTreeNode& a, const WmsTreeNode& b) {
 		return GB_Utf8CompareLogical(a.textUtf8, b.textUtf8) < 0;
-	});
+		});
 	return true;
 }
 
@@ -3906,9 +5087,18 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		return {};
 	}
 
+	if (input.requestAreaWkt.empty() || !input.requestAreaPolygon.IsValid())
+	{
+		GBLOG_WARNING(GB_Utf8Format("Request area is invalid. requestAreaWkt empty: %s, polygon valid: %s", input.requestAreaWkt.empty() ? "true" : "false", input.requestAreaPolygon.IsValid() ? "true" : "false"));
+		return {};
+	}
+
+	std::vector<MapRequestItem> outRequestItems;
+	std::set<std::string> usedItemUids;
 	std::string styleName = "";
 	std::string tileMatrixSetName = "";
 	std::string formatName = "";
+
 	if (input.mapType == MapTileMode::WMTS)
 	{
 		const WmtsTileLayer* tileLayer = FindWmtsTileLayer(input.capabilities, input.layerNameUtf8);
@@ -3917,7 +5107,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 			GBLOG_WARNING(GB_Utf8Format("Tile layer '%s' not found in capabilities.", input.layerNameUtf8.c_str()));
 			return {};
 		}
-		
+
 		const std::vector<std::string> tileLayerStyles = GetTileLayerStyles(tileLayer);
 		if (input.styleUtf8.empty())
 		{
@@ -3980,7 +5170,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 
 		const WmtsTileMatrixSet* tileMatrixSet = nullptr;
 		{
-			const auto it = input.capabilities->capability.tileMatrixSets.find(tileMatrixSetName);
+			const std::unordered_map<std::string, WmtsTileMatrixSet>::const_iterator it = input.capabilities->capability.tileMatrixSets.find(tileMatrixSetName);
 			if (it == input.capabilities->capability.tileMatrixSets.end())
 			{
 				GBLOG_WARNING(GB_Utf8Format("Tile matrix set '%s' not found in capabilities.", tileMatrixSetName.c_str()));
@@ -3994,6 +5184,13 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 			return {};
 		}
 
+		std::string tileMatrixSetCanonicalWktUtf8 = "";
+		if (!TryCanonicalizeCrsDefinition(tileMatrixSet->crsUtf8, tileMatrixSetCanonicalWktUtf8))
+		{
+			GBLOG_WARNING(GB_Utf8Format("Failed to canonicalize CRS '%s' of tile matrix set '%s'.", tileMatrixSet->crsUtf8.c_str(), tileMatrixSetName.c_str()));
+			return {};
+		}
+
 		std::vector<GB_Polygon> requestAreaInTileMatrixSetCrs;
 		if (!TransformGeoPolygon(input.requestAreaWkt, input.requestAreaPolygon, tileMatrixSet->crsUtf8, requestAreaInTileMatrixSetCrs) || requestAreaInTileMatrixSetCrs.empty())
 		{
@@ -4001,15 +5198,112 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 			return {};
 		}
 
+		const WmtsTileMatrixSetLink* tileMatrixSetLink = nullptr;
+		{
+			const auto setLinkIterator = tileLayer->setLinks.find(tileMatrixSetName);
+			if (setLinkIterator != tileLayer->setLinks.end())
+			{
+				tileMatrixSetLink = &(setLinkIterator->second);
+			}
+		}
 
-		
+		for (size_t polygonIndex = 0; polygonIndex < requestAreaInTileMatrixSetCrs.size(); polygonIndex++)
+		{
+			const GB_Polygon& requestPolygon = requestAreaInTileMatrixSetCrs[polygonIndex];
+			GB_Rectangle requestBoundingBox;
+			if (!TryGetPolygonBoundingBox(requestPolygon, requestBoundingBox))
+			{
+				continue;
+			}
 
+			double targetResolution = 0;
+			int requestedZoomLevel = -1;
+			if (!ResolveTargetResolution(input, tileMatrixSet->crsUtf8, requestBoundingBox, tileMatrixSet, targetResolution, requestedZoomLevel))
+			{
+				GBLOG_WARNING(GB_Utf8Format("Failed to resolve target resolution for WMTS layer '%s'. Request polygon index: %d, bounding box: %s", input.layerNameUtf8.c_str(), static_cast<int>(polygonIndex), requestBoundingBox.SerializeToString().c_str()));
+				return {};
+			}
 
+			const WmtsTileMatrix* selectedTileMatrix = SelectTileMatrix(*tileMatrixSet, targetResolution, requestedZoomLevel, input.renderTarget.lodSelectMode, input.minZoomLevel, input.maxZoomLevel);
+			if (!selectedTileMatrix)
+			{
+				GBLOG_WARNING(GB_Utf8Format("Failed to select tile matrix for WMTS layer '%s'. Target resolution: %.15g, requested zoom: %d", input.layerNameUtf8.c_str(), targetResolution, requestedZoomLevel));
+				return {};
+			}
 
+			const int zoomLevel = GetTileMatrixZoomLevel(*tileMatrixSet, *selectedTileMatrix);
+			const WmtsTileMatrixLimits* tileMatrixLimits = nullptr;
+			if (tileMatrixSetLink)
+			{
+				const std::unordered_map<std::string, WmtsTileMatrixLimits>::const_iterator limitsIterator = tileMatrixSetLink->limits.find(selectedTileMatrix->identifierUtf8);
+				if (limitsIterator != tileMatrixSetLink->limits.end())
+				{
+					tileMatrixLimits = &(limitsIterator->second);
+				}
+			}
 
+			GB_IntInterval colIndexInterval;
+			GB_IntInterval rowIndexInterval;
+			if (!selectedTileMatrix->Intersects(requestBoundingBox, tileMatrixLimits, colIndexInterval, rowIndexInterval) || !colIndexInterval.IsValid() || !rowIndexInterval.IsValid())
+			{
+				continue;
+			}
 
+			for (int rowIndex = rowIndexInterval.lower; rowIndex <= rowIndexInterval.upper; rowIndex++)
+			{
+				for (int colIndex = colIndexInterval.lower; colIndex <= colIndexInterval.upper; colIndex++)
+				{
+					const GB_Rectangle tileRectangle = selectedTileMatrix->TileRect(colIndex, rowIndex);
+					if (!tileRectangle.IsValid())
+					{
+						continue;
+					}
 
+					const GB_Rectangle intersectionBoundingBox = tileRectangle.Intersected(requestBoundingBox);
+					if (!intersectionBoundingBox.IsValid() || !std::isfinite(intersectionBoundingBox.Area()) || intersectionBoundingBox.Area() <= 0)
+					{
+						continue;
+					}
 
+					std::vector<GB_Polygon> intersectionAreas;
+					std::vector<std::vector<GB_Polygon>> holeAreas;
+					if (!requestPolygon.ComputeIntersection(GB_Polygon(tileRectangle), intersectionAreas, holeAreas) || intersectionAreas.empty())
+					{
+						continue;
+					}
+
+					const double intersectionArea = ComputePolygonRegionsNetArea(intersectionAreas, holeAreas);
+					if (!std::isfinite(intersectionArea) || intersectionArea <= 0.0)
+					{
+						continue;
+					}
+
+					std::string urlUtf8 = BuildWmtsRestfulUrl(*tileLayer, formatName, styleName, tileMatrixSetName, *selectedTileMatrix, rowIndex, colIndex);
+					if (urlUtf8.empty())
+					{
+						urlUtf8 = BuildWmtsKvpUrl(input, *tileLayer, styleName, tileMatrixSetName, formatName, *selectedTileMatrix, rowIndex, colIndex);
+					}
+					if (urlUtf8.empty())
+					{
+						GBLOG_WARNING(GB_Utf8Format("Failed to build WMTS tile URL. Layer: %s, TileMatrixSet: %s, TileMatrix: %s, Row: %d, Col: %d", input.layerNameUtf8.c_str(), tileMatrixSetName.c_str(), selectedTileMatrix->identifierUtf8.c_str(), rowIndex, colIndex));
+						return {};
+					}
+
+					MapRequestItem requestItem;
+					requestItem.urlUtf8 = urlUtf8;
+					requestItem.boundingBox.Set(tileMatrixSetCanonicalWktUtf8, tileRectangle);
+					requestItem.zoomLevel = zoomLevel;
+					requestItem.rowIndex = static_cast<size_t>(rowIndex);
+					requestItem.colIndex = static_cast<size_t>(colIndex);
+					requestItem.uidUtf8 = input.layerNameUtf8 + "|" + tileMatrixSetName + "|" + selectedTileMatrix->identifierUtf8 + "|" + std::to_string(rowIndex) + "|" + std::to_string(colIndex);
+
+					if (usedItemUids.insert(requestItem.uidUtf8).second)
+					{
+						outRequestItems.push_back(std::move(requestItem));
+					}
+				}
+			}
+		}
 	}
 	else if (input.mapType == MapTileMode::WMSC)
 	{
@@ -4044,6 +5338,11 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		if (input.formatUtf8.empty())
 		{
 			formatName = SelectAppropriateWmsFormat(formats);
+			if (formatName.empty())
+			{
+				GBLOG_WARNING(GB_Utf8Format("Unable to determine an appropriate WMS format for layer '%s'.", input.layerNameUtf8.c_str()));
+				return {};
+			}
 		}
 		else
 		{
@@ -4054,15 +5353,1336 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 			}
 			formatName = input.formatUtf8;
 		}
+
+		const std::string wmsLayerCrsDefinitionUtf8 = wmsLayer->PreferredAvailableCrs();
+		if (wmsLayerCrsDefinitionUtf8.empty())
+		{
+			GBLOG_WARNING(GB_Utf8Format("No available CRS found for WMS layer '%s'.", input.layerNameUtf8.c_str()));
+			return {};
+		}
+
+		std::string wmsLayerCanonicalWktUtf8 = "";
+		if (!TryCanonicalizeCrsDefinition(wmsLayerCrsDefinitionUtf8, wmsLayerCanonicalWktUtf8))
+		{
+			GBLOG_WARNING(GB_Utf8Format("Failed to canonicalize CRS '%s' for WMS layer '%s'.", wmsLayerCrsDefinitionUtf8.c_str(), input.layerNameUtf8.c_str()));
+			return {};
+		}
+
+		std::vector<GB_Polygon> requestAreaInWmsCrs;
+		if (!TransformGeoPolygon(input.requestAreaWkt, input.requestAreaPolygon, wmsLayerCrsDefinitionUtf8, requestAreaInWmsCrs) || requestAreaInWmsCrs.empty())
+		{
+			GBLOG_WARNING(GB_Utf8Format("Failed to transform request area polygon to CRS '%s' of WMS layer '%s'.", wmsLayerCrsDefinitionUtf8.c_str(), input.layerNameUtf8.c_str()));
+			return {};
+		}
+
+		const size_t serviceMaxWidth = input.capabilities->service.maxWidth;
+		const size_t serviceMaxHeight = input.capabilities->service.maxHeight;
+		for (size_t polygonIndex = 0; polygonIndex < requestAreaInWmsCrs.size(); polygonIndex++)
+		{
+			const GB_Polygon& requestPolygon = requestAreaInWmsCrs[polygonIndex];
+			GB_Rectangle requestBoundingBox;
+			if (!TryGetPolygonBoundingBox(requestPolygon, requestBoundingBox))
+			{
+				continue;
+			}
+
+			double targetResolution = 0;
+			int requestedZoomLevel = -1;
+			if (!ResolveTargetResolution(input, wmsLayerCrsDefinitionUtf8, requestBoundingBox, nullptr, targetResolution, requestedZoomLevel))
+			{
+				GBLOG_WARNING(GB_Utf8Format("Failed to resolve target resolution for WMS layer '%s'. Request polygon index: %d, bounding box: %s", input.layerNameUtf8.c_str(), static_cast<int>(polygonIndex), requestBoundingBox.SerializeToString().c_str()));
+				return {};
+			}
+
+			std::vector<GB_Rectangle> requestRectangles;
+			BuildAdaptivePolygonRequestRectangles(requestPolygon, requestBoundingBox, targetResolution, requestRectangles);
+			if (requestRectangles.empty())
+			{
+				continue;
+			}
+
+			for (size_t requestRectangleIndex = 0; requestRectangleIndex < requestRectangles.size(); requestRectangleIndex++)
+			{
+				const GB_Rectangle& currentRequestRectangle = requestRectangles[requestRectangleIndex];
+				if (!currentRequestRectangle.IsValid())
+				{
+					continue;
+				}
+
+				size_t imageWidth = 0;
+				size_t imageHeight = 0;
+				if (!ComputeWmsImageSize(input, *wmsLayer, currentRequestRectangle, targetResolution, serviceMaxWidth, serviceMaxHeight, imageWidth, imageHeight))
+				{
+					GBLOG_WARNING(GB_Utf8Format("Failed to compute WMS image size for layer '%s'. Request polygon index: %d, bounding box: %s", input.layerNameUtf8.c_str(), static_cast<int>(polygonIndex), currentRequestRectangle.SerializeToString().c_str()));
+					return {};
+				}
+
+				std::string urlUtf8 = BuildWmsGetMapUrl(input, *wmsLayer, styleName, wmsLayerCrsDefinitionUtf8, formatName, currentRequestRectangle, imageWidth, imageHeight);
+				if (urlUtf8.empty())
+				{
+					GBLOG_WARNING(GB_Utf8Format("Failed to build WMS GetMap URL for layer '%s'.", input.layerNameUtf8.c_str()));
+					return {};
+				}
+
+				MapRequestItem requestItem;
+				requestItem.urlUtf8 = urlUtf8;
+				requestItem.boundingBox.Set(wmsLayerCanonicalWktUtf8, currentRequestRectangle);
+				requestItem.zoomLevel = requestedZoomLevel;
+				requestItem.uidUtf8 = input.layerNameUtf8 + "|" + wmsLayerCrsDefinitionUtf8 + "|" + formatName + "|" + std::to_string(imageWidth) + "x" + std::to_string(imageHeight) + "|" + BuildRectangleBboxText(currentRequestRectangle);
+
+				if (usedItemUids.insert(requestItem.uidUtf8).second)
+				{
+					outRequestItems.push_back(std::move(requestItem));
+				}
+			}
+		}
+	}
+	else
+	{
+		GBLOG_WARNING(GB_Utf8Format("MapTileMode %d is not supported by BuildVisibleMapRequestItems yet.", static_cast<int>(input.mapType)));
+		return {};
 	}
 
-
-
-
-
-
-
-
+	if (success)
+	{
+		*success = true;
+	}
+	return outRequestItems;
 }
 
 
+#include <cstdlib>
+#include <locale>
+#include <memory>
+#include <string>
+
+namespace internal
+{
+	struct CplFreeDeleter
+	{
+		void operator()(char* text) const
+		{
+			if (text != nullptr)
+			{
+				CPLFree(text);
+			}
+		}
+	};
+
+	static std::string NormalizeToken(const std::string& text)
+	{
+		std::string normalized;
+		normalized.reserve(text.size());
+
+		for (size_t i = 0; i < text.size(); i++)
+		{
+			const unsigned char character = static_cast<unsigned char>(text[i]);
+
+			if ((character >= 'a' && character <= 'z') ||
+				(character >= '0' && character <= '9'))
+			{
+				normalized.push_back(static_cast<char>(character));
+			}
+			else if (character >= 'A' && character <= 'Z')
+			{
+				normalized.push_back(static_cast<char>(character - 'A' + 'a'));
+			}
+		}
+
+		return normalized;
+	}
+
+	static bool IsOnlyTrailingAsciiWhitespace(const char* text)
+	{
+		if (text == nullptr)
+		{
+			return true;
+		}
+
+		while (*text != '\0')
+		{
+			if (*text != ' ' &&
+				*text != '\t' &&
+				*text != '\r' &&
+				*text != '\n' &&
+				*text != '\f' &&
+				*text != '\v')
+			{
+				return false;
+			}
+			text++;
+		}
+
+		return true;
+	}
+
+	static bool TryImportSpatialReference(const std::string& wkt, OGRSpatialReference& spatialReference)
+	{
+		if (wkt.empty())
+		{
+			return false;
+		}
+
+		const char* current = wkt.c_str();
+		if (spatialReference.importFromWkt(&current) != OGRERR_NONE)
+		{
+			return false;
+		}
+
+		return IsOnlyTrailingAsciiWhitespace(current);
+	}
+
+	static bool TryImportSrsNode(const std::string& wkt, OGR_SRSNode& rootNode)
+	{
+		if (wkt.empty())
+		{
+			return false;
+		}
+
+		const char* current = wkt.c_str();
+		if (rootNode.importFromWkt(&current) != OGRERR_NONE)
+		{
+			return false;
+		}
+
+		return IsOnlyTrailingAsciiWhitespace(current);
+	}
+
+	static bool TryExportToWktWithFormat(const OGRSpatialReference& spatialReference, const char* formatName, std::string& outputWkt)
+	{
+		const std::string formatOption = std::string("FORMAT=") + formatName;
+		const char* options[] =
+		{
+			formatOption.c_str(),
+			nullptr
+		};
+
+		char* rawWkt = nullptr;
+		if (spatialReference.exportToWkt(&rawWkt, options) != OGRERR_NONE || rawWkt == nullptr)
+		{
+			return false;
+		}
+
+		std::unique_ptr<char, CplFreeDeleter> wktHolder(rawWkt);
+		outputWkt.assign(wktHolder.get());
+		return true;
+	}
+
+	static bool TryExportToWkt2(const OGRSpatialReference& spatialReference, std::string& outputWkt)
+	{
+		static const char* const formatNames[] =
+		{
+			"WKT2_2019",
+			"WKT2_2018",
+			"WKT2"
+		};
+
+		for (size_t i = 0; i < sizeof(formatNames) / sizeof(formatNames[0]); i++)
+		{
+			if (TryExportToWktWithFormat(spatialReference, formatNames[i], outputWkt))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	static bool HasExplicitAreaAndBbox(const OGR_SRSNode* node)
+	{
+		if (node == nullptr)
+		{
+			return false;
+		}
+
+		return node->GetNode("AREA") != nullptr && node->GetNode("BBOX") != nullptr;
+	}
+
+	static bool IsTransverseMercator(const OGRSpatialReference& spatialReference)
+	{
+		const char* projectionName = spatialReference.GetAttrValue("PROJECTION");
+		if (projectionName != nullptr)
+		{
+			if (NormalizeToken(projectionName) == NormalizeToken(SRS_PT_TRANSVERSE_MERCATOR))
+			{
+				return true;
+			}
+		}
+
+		const char* methodName = spatialReference.GetAttrValue("METHOD");
+		if (methodName != nullptr)
+		{
+			if (NormalizeToken(methodName) == "transversemercator")
+			{
+				return true;
+			}
+		}
+
+		methodName = spatialReference.GetAttrValue("CONVERSION|METHOD");
+		if (methodName != nullptr)
+		{
+			if (NormalizeToken(methodName) == "transversemercator")
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	static bool TryParseDouble(const char* text, double& value)
+	{
+		if (text == nullptr || *text == '\0')
+		{
+			return false;
+		}
+
+		char* endPtr = nullptr;
+		value = std::strtod(text, &endPtr);
+		if (endPtr == text)
+		{
+			return false;
+		}
+
+		return IsOnlyTrailingAsciiWhitespace(endPtr) && std::isfinite(value);
+	}
+
+	static bool IsCentralMeridianParameterName(const char* parameterName)
+	{
+		if (parameterName == nullptr)
+		{
+			return false;
+		}
+
+		const std::string normalizedName = NormalizeToken(parameterName);
+		return normalizedName == "centralmeridian" ||
+			normalizedName == "longitudeoforigin" ||
+			normalizedName == "longitudeofnaturalorigin";
+	}
+
+	static bool TryGetCentralMeridianFromTree(const OGR_SRSNode* node, double& centralMeridianDeg)
+	{
+		if (node == nullptr)
+		{
+			return false;
+		}
+
+		if (NormalizeToken(node->GetValue()) == "parameter" && node->GetChildCount() >= 2)
+		{
+			const OGR_SRSNode* parameterNameNode = node->GetChild(0);
+			const OGR_SRSNode* parameterValueNode = node->GetChild(1);
+
+			if (parameterNameNode != nullptr &&
+				parameterValueNode != nullptr &&
+				IsCentralMeridianParameterName(parameterNameNode->GetValue()))
+			{
+				if (TryParseDouble(parameterValueNode->GetValue(), centralMeridianDeg))
+				{
+					return true;
+				}
+			}
+		}
+
+		for (int childIndex = 0; childIndex < node->GetChildCount(); childIndex++)
+		{
+			if (TryGetCentralMeridianFromTree(node->GetChild(childIndex), centralMeridianDeg))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	static bool TryGetCentralMeridian(const OGRSpatialReference& spatialReference, double& centralMeridianDeg)
+	{
+		static const char* const parameterNames[] =
+		{
+			SRS_PP_CENTRAL_MERIDIAN,
+			SRS_PP_LONGITUDE_OF_ORIGIN
+		};
+
+		for (size_t i = 0; i < sizeof(parameterNames) / sizeof(parameterNames[0]); i++)
+		{
+			OGRErr errorCode = OGRERR_FAILURE;
+			const double value = spatialReference.GetNormProjParm(parameterNames[i], 0.0, &errorCode);
+			if (errorCode == OGRERR_NONE && std::isfinite(value))
+			{
+				centralMeridianDeg = value;
+				return true;
+			}
+		}
+
+		return TryGetCentralMeridianFromTree(spatialReference.GetRoot(), centralMeridianDeg);
+	}
+
+	static std::string FormatDouble(double value)
+	{
+		std::ostringstream stream;
+		stream.imbue(std::locale::classic());
+		stream << std::setprecision(15) << value;
+		return stream.str();
+	}
+
+	static std::string FormatLongitudeLabel(double longitudeDeg)
+	{
+		if (!std::isfinite(longitudeDeg))
+		{
+			return std::string();
+		}
+
+		const double absoluteLongitude = std::abs(longitudeDeg);
+		if (absoluteLongitude == 0.0)
+		{
+			return "0";
+		}
+
+		return FormatDouble(absoluteLongitude) + (longitudeDeg > 0.0 ? "E" : "W");
+	}
+
+	static OGR_SRSNode* CreateLeafNode(const std::string& value)
+	{
+		return new OGR_SRSNode(value.c_str());
+	}
+
+	static OGR_SRSNode* CreateSingleStringChildNode(const char* nodeName, const std::string& text)
+	{
+		OGR_SRSNode* node = new OGR_SRSNode(nodeName);
+		node->AddChild(CreateLeafNode(text));
+		return node;
+	}
+
+	static OGR_SRSNode* CreateBboxNode(double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg)
+	{
+		OGR_SRSNode* bboxNode = new OGR_SRSNode("BBOX");
+		bboxNode->AddChild(CreateLeafNode(FormatDouble(southLatitudeDeg)));
+		bboxNode->AddChild(CreateLeafNode(FormatDouble(westLongitudeDeg)));
+		bboxNode->AddChild(CreateLeafNode(FormatDouble(northLatitudeDeg)));
+		bboxNode->AddChild(CreateLeafNode(FormatDouble(eastLongitudeDeg)));
+		return bboxNode;
+	}
+
+	static OGR_SRSNode* CreateUsageNode(double westLongitudeDeg, double eastLongitudeDeg)
+	{
+		OGR_SRSNode* usageNode = new OGR_SRSNode("USAGE");
+		usageNode->AddChild(CreateSingleStringChildNode("SCOPE", "Custom area derived from central meridian."));
+		usageNode->AddChild(CreateSingleStringChildNode("AREA", std::string("Between ") + FormatLongitudeLabel(westLongitudeDeg) + " and " + FormatLongitudeLabel(eastLongitudeDeg) + "."));
+		usageNode->AddChild(CreateBboxNode(westLongitudeDeg, -85.0, eastLongitudeDeg, 85.0));
+		return usageNode;
+	}
+
+	static int FindUsageInsertChildIndex(const OGR_SRSNode& rootNode)
+	{
+		for (int childIndex = 0; childIndex < rootNode.GetChildCount(); childIndex++)
+		{
+			const OGR_SRSNode* childNode = rootNode.GetChild(childIndex);
+			if (childNode == nullptr)
+			{
+				continue;
+			}
+
+			const std::string normalizedValue = NormalizeToken(childNode->GetValue());
+			if (normalizedValue == "id" || normalizedValue == "remark")
+			{
+				return childIndex;
+			}
+		}
+
+		return rootNode.GetChildCount();
+	}
+
+	static bool InjectUsageAreaBboxIntoWkt2(std::string& wkt2Text, double westLongitudeDeg, double eastLongitudeDeg)
+	{
+		OGR_SRSNode rootNode;
+		if (!TryImportSrsNode(wkt2Text, rootNode))
+		{
+			return false;
+		}
+
+		const std::string normalizedRootValue = NormalizeToken(rootNode.GetValue());
+		if (normalizedRootValue != "projcrs" &&
+			normalizedRootValue != "projectedcrs" &&
+			normalizedRootValue != "derivedprojcrs")
+		{
+			return false;
+		}
+
+		if (HasExplicitAreaAndBbox(&rootNode))
+		{
+			return true;
+		}
+
+		OGR_SRSNode* usageNode = rootNode.GetNode("USAGE");
+		if (usageNode == nullptr)
+		{
+			usageNode = CreateUsageNode(westLongitudeDeg, eastLongitudeDeg);
+			rootNode.InsertChild(usageNode, FindUsageInsertChildIndex(rootNode));
+		}
+		else
+		{
+			if (usageNode->FindChild("SCOPE") < 0)
+			{
+				usageNode->InsertChild(CreateSingleStringChildNode("SCOPE", "Custom area derived from central meridian."), 0);
+			}
+
+			if (usageNode->FindChild("AREA") < 0)
+			{
+				usageNode->AddChild(CreateSingleStringChildNode("AREA", std::string("Between ") + FormatLongitudeLabel(westLongitudeDeg) + " and " + FormatLongitudeLabel(eastLongitudeDeg) + "."));
+			}
+
+			if (usageNode->FindChild("BBOX") < 0)
+			{
+				usageNode->AddChild(CreateBboxNode(westLongitudeDeg, -85.0, eastLongitudeDeg, 85.0));
+			}
+		}
+
+		char* rawWkt = nullptr;
+		if (rootNode.exportToWkt(&rawWkt) != OGRERR_NONE || rawWkt == nullptr)
+		{
+			return false;
+		}
+
+		std::unique_ptr<char, CplFreeDeleter> wktHolder(rawWkt);
+		wkt2Text.assign(wktHolder.get());
+		return true;
+	}
+}
+
+bool TryExportWkt2WithCustomTransverseMercatorAreaBbox(const std::string& inputWkt, std::string& outputWkt2, bool* areaBboxInjected)
+{
+	outputWkt2.clear();
+
+	if (areaBboxInjected != nullptr)
+	{
+		*areaBboxInjected = false;
+	}
+
+	OGRSpatialReference spatialReference;
+	if (!internal::TryImportSpatialReference(inputWkt, spatialReference))
+	{
+		return false;
+	}
+
+	if (!internal::TryExportToWkt2(spatialReference, outputWkt2))
+	{
+		return false;
+	}
+
+	if (!spatialReference.IsProjected())
+	{
+		return true;
+	}
+
+	if (!internal::IsTransverseMercator(spatialReference))
+	{
+		return true;
+	}
+
+	if (internal::HasExplicitAreaAndBbox(spatialReference.GetRoot()))
+	{
+		return true;
+	}
+
+	double centralMeridianDeg = 0.0;
+	if (!internal::TryGetCentralMeridian(spatialReference, centralMeridianDeg))
+	{
+		return true;
+	}
+
+	const double westLongitudeDeg = centralMeridianDeg - 3.0;
+	const double eastLongitudeDeg = centralMeridianDeg + 3.0;
+
+	if (!internal::InjectUsageAreaBboxIntoWkt2(outputWkt2, westLongitudeDeg, eastLongitudeDeg))
+	{
+		return false;
+	}
+
+	if (areaBboxInjected != nullptr)
+	{
+		*areaBboxInjected = true;
+	}
+
+	return true;
+}
+
+#include "proj.h"
+#include <algorithm>
+
+static inline std::string GetProjErrorMessage(PJ_CONTEXT* context)
+{
+	if (!context)
+	{
+		return "PROJ context is null.";
+	}
+
+	const int errorCode = proj_context_errno(context);
+	const char* errorText = proj_context_errno_string(context, errorCode);
+	if (errorText)
+	{
+		return std::string(errorText);
+	}
+
+	return "Unknown PROJ error.";
+}
+
+struct Bounds2D_
+{
+	double minX = 0;
+	double minY = 0;
+	double maxX = 0;
+	double maxY = 0;
+};
+static inline bool TransformBoundsInternal(PJ_CONTEXT* context, PJ* transform, double minX, double minY, double maxX, double maxY, Bounds2D_& outputBounds, std::string* errorMessage)
+{
+	double outMinX = 0;
+	double outMinY = 0;
+	double outMaxX = 0;
+	double outMaxY = 0;
+
+	const int ok = proj_trans_bounds(context, transform, PJ_FWD, minX, minY, maxX, maxY, &outMinX, &outMinY, &outMaxX, &outMaxY, 21);
+	if (!ok)
+	{
+		if (errorMessage)
+		{
+			*errorMessage = GetProjErrorMessage(context);
+		}
+		return false;
+	}
+
+	outputBounds.minX = outMinX;
+	outputBounds.minY = outMinY;
+	outputBounds.maxX = outMaxX;
+	outputBounds.maxY = outMaxY;
+	return true;
+}
+
+static inline bool GetCrsAreaOfUseDegreesFromWkt(const std::string& wkt, Bounds2D_& areaOfUseBounds, std::string* errorMessage = nullptr)
+{
+	using ContextPtr = std::unique_ptr<PJ_CONTEXT, decltype(&proj_context_destroy)>;
+	using PjPtr = std::unique_ptr<PJ, decltype(&proj_destroy)>;
+
+	ContextPtr context(proj_context_create(), &proj_context_destroy);
+	if (!context)
+	{
+		if (errorMessage)
+		{
+			*errorMessage = "Failed to create PROJ context.";
+		}
+		return false;
+	}
+
+	PROJ_STRING_LIST warnings = nullptr;
+	PROJ_STRING_LIST grammarErrors = nullptr;
+
+	PjPtr crs(proj_create_from_wkt(context.get(), wkt.c_str(), nullptr, &warnings, &grammarErrors), &proj_destroy);
+
+	proj_string_list_destroy(warnings);
+	proj_string_list_destroy(grammarErrors);
+
+	if (!crs)
+	{
+		if (errorMessage)
+		{
+			*errorMessage = GetProjErrorMessage(context.get());
+		}
+		return false;
+	}
+
+	if (!proj_is_crs(crs.get()))
+	{
+		if (errorMessage)
+		{
+			*errorMessage = "The WKT does not describe a CRS object.";
+		}
+		return false;
+	}
+
+	const char* areaName = nullptr;
+	const int ok = proj_get_area_of_use(context.get(), crs.get(), &areaOfUseBounds.minX, &areaOfUseBounds.minY, &areaOfUseBounds.maxX, &areaOfUseBounds.maxY, &areaName);
+
+	if (!ok)
+	{
+		if (errorMessage)
+		{
+			*errorMessage = "Area of use is unknown for this WKT/CRS.";
+		}
+		return false;
+	}
+
+	return true;
+}
+
+static inline bool GetCrsEnvelopeInOwnUnitsFromWkt(const std::string& wkt, Bounds2D_& envelopeBounds, std::string* errorMessage = nullptr)
+{
+	using ContextPtr = std::unique_ptr<PJ_CONTEXT, decltype(&proj_context_destroy)>;
+	using PjPtr = std::unique_ptr<PJ, decltype(&proj_destroy)>;
+
+	ContextPtr context(proj_context_create(), &proj_context_destroy);
+	if (!context)
+	{
+		if (errorMessage)
+		{
+			*errorMessage = "Failed to create PROJ context.";
+		}
+		return false;
+	}
+
+	PROJ_STRING_LIST warnings = nullptr;
+	PROJ_STRING_LIST grammarErrors = nullptr;
+
+	PjPtr crs(proj_create_from_wkt(context.get(), wkt.c_str(), nullptr, &warnings, &grammarErrors), &proj_destroy);
+
+	proj_string_list_destroy(warnings);
+	proj_string_list_destroy(grammarErrors);
+
+	if (!crs)
+	{
+		if (errorMessage)
+		{
+			*errorMessage = GetProjErrorMessage(context.get());
+		}
+		return false;
+	}
+
+	if (!proj_is_crs(crs.get()))
+	{
+		if (errorMessage)
+		{
+			*errorMessage = "The WKT does not describe a CRS object.";
+		}
+		return false;
+	}
+
+	double westLon = 0;
+	double southLat = 0;
+	double eastLon = 0;
+	double northLat = 0;
+	const char* areaName = nullptr;
+
+	const int gotArea = proj_get_area_of_use(context.get(), crs.get(), &westLon, &southLat, &eastLon, &northLat, &areaName);
+
+	if (!gotArea)
+	{
+		if (errorMessage)
+		{
+			*errorMessage = "Area of use is unknown for this WKT/CRS, so projected bounds cannot be inferred reliably.";
+		}
+		return false;
+	}
+
+	PjPtr geodeticCrs(proj_crs_get_geodetic_crs(context.get(), crs.get()), &proj_destroy);
+	if (!geodeticCrs)
+	{
+		if (errorMessage)
+		{
+			*errorMessage = GetProjErrorMessage(context.get());
+		}
+		return false;
+	}
+
+	PjPtr transform(proj_create_crs_to_crs_from_pj(context.get(), geodeticCrs.get(), crs.get(), nullptr, nullptr), &proj_destroy);
+
+	if (!transform)
+	{
+		if (errorMessage)
+		{
+			*errorMessage = GetProjErrorMessage(context.get());
+		}
+		return false;
+	}
+
+	PjPtr normalizedTransform(proj_normalize_for_visualization(context.get(), transform.get()), &proj_destroy);
+
+	PJ* transformToUse = normalizedTransform ? normalizedTransform.get() : transform.get();
+
+	// 常见情况：westLon <= eastLon
+	if (westLon <= eastLon)
+	{
+		return TransformBoundsInternal(context.get(), transformToUse, westLon, southLat, eastLon, northLat, envelopeBounds, errorMessage);
+	}
+
+	// 保守处理：若 area of use 跨越反经线，则拆成两个范围分别投影后再合并
+	Bounds2D_ firstPartBounds;
+	Bounds2D_ secondPartBounds;
+
+	if (!TransformBoundsInternal(context.get(), transformToUse, westLon, southLat, 180, northLat, firstPartBounds, errorMessage))
+	{
+		return false;
+	}
+
+	if (!TransformBoundsInternal(context.get(), transformToUse, -180, southLat, eastLon, northLat, secondPartBounds, errorMessage))
+	{
+		return false;
+	}
+
+	envelopeBounds.minX = std::min(firstPartBounds.minX, secondPartBounds.minX);
+	envelopeBounds.minY = std::min(firstPartBounds.minY, secondPartBounds.minY);
+	envelopeBounds.maxX = std::max(firstPartBounds.maxX, secondPartBounds.maxX);
+	envelopeBounds.maxY = std::max(firstPartBounds.maxY, secondPartBounds.maxY);
+	return true;
+}
+
+//bool GetCartesianExtents(const std::string& wkt, double& minX, double& minY, double& maxX, double& maxY)
+//{
+//	Bounds2D_ envelopeBounds;
+//	if (!GetCrsEnvelopeInOwnUnitsFromWkt(wkt, envelopeBounds))
+//	{
+//		return false;
+//	}
+//	minX = envelopeBounds.minX;
+//	minY = envelopeBounds.minY;
+//	maxX = envelopeBounds.maxX;
+//	maxY = envelopeBounds.maxY;
+//	return true;
+//}
+
+namespace internal2
+{
+	static constexpr double kUnknownAreaOfUseMarker = -1000.0;
+	static constexpr double kAreaOfUseTolerance = 1e-12;
+
+	static inline bool IsFiniteNumber(double value)
+	{
+		return std::isfinite(value) != 0;
+	}
+
+	static inline bool IsValidAreaOfUse(double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg)
+	{
+		// GDAL may return success while values are -1000 (unknown area marker).
+		if (std::fabs(westLongitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance ||
+			std::fabs(southLatitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance ||
+			std::fabs(eastLongitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance ||
+			std::fabs(northLatitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance)
+		{
+			return false;
+		}
+
+		if (!IsFiniteNumber(westLongitudeDeg) ||
+			!IsFiniteNumber(southLatitudeDeg) ||
+			!IsFiniteNumber(eastLongitudeDeg) ||
+			!IsFiniteNumber(northLatitudeDeg))
+		{
+			return false;
+		}
+
+		if (southLatitudeDeg > northLatitudeDeg)
+		{
+			return false;
+		}
+
+		// Longitude can cross anti-meridian, so only validate each endpoint range.
+		if (westLongitudeDeg < -180.0 || westLongitudeDeg > 180.0 ||
+			eastLongitudeDeg < -180.0 || eastLongitudeDeg > 180.0)
+		{
+			return false;
+		}
+
+		if (southLatitudeDeg < -90.0 || southLatitudeDeg > 90.0 ||
+			northLatitudeDeg < -90.0 || northLatitudeDeg > 90.0)
+		{
+			return false;
+		}
+
+		return true;
+	}
+
+	static inline std::string ToLowerAscii(const std::string& text)
+	{
+		std::string lowerText = text;
+		std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), [](unsigned char character) -> char {
+			return static_cast<char>(std::tolower(character));
+			});
+		return lowerText;
+	}
+
+	static inline bool EqualsIgnoreCaseAscii(const char* leftText, const char* rightText)
+	{
+		if (!leftText || !rightText)
+		{
+			return false;
+		}
+
+		return ToLowerAscii(leftText) == ToLowerAscii(rightText);
+	}
+
+	static inline bool ContainsIgnoreCaseAscii(const char* text, const char* pattern)
+	{
+		if (!text || !pattern)
+		{
+			return false;
+		}
+
+		const std::string lowerText = ToLowerAscii(text);
+		const std::string lowerPattern = ToLowerAscii(pattern);
+		return lowerText.find(lowerPattern) != std::string::npos;
+	}
+
+	static inline std::string FormatDouble(double value)
+	{
+		std::ostringstream stream;
+		stream.imbue(std::locale::classic());
+		stream << std::setprecision(15) << value;
+		return stream.str();
+	}
+
+	static inline double ClampLatitude(double latitudeDeg)
+	{
+		return std::max(-90.0, std::min(90.0, latitudeDeg));
+	}
+
+	static inline double ClampLongitude(double longitudeDeg)
+	{
+		return std::max(-180.0, std::min(180.0, longitudeDeg));
+	}
+
+	static double NormalizeLongitude(double longitudeDeg)
+	{
+		// 为了处理例如 190、-190 这样的输入：把经度规整到 [-180, 180] 区间
+		while (longitudeDeg < -180)
+		{
+			longitudeDeg += 360;
+		}
+
+		while (longitudeDeg > 180)
+		{
+			longitudeDeg -= 360;
+		}
+
+		return longitudeDeg;
+	}
+
+	static inline bool TryGetNormProjParm(const OGRSpatialReference& spatialReference, const char* parameterName, double& parameterValue)
+	{
+		OGRErr error = OGRERR_FAILURE;
+		const double value = spatialReference.GetNormProjParm(parameterName, 0, &error);
+		if (error != OGRERR_NONE)
+		{
+			return false;
+		}
+
+		parameterValue = value;
+		return true;
+	}
+
+	static bool TryGetFirstExistingNormProjParm(const OGRSpatialReference& spatialReference, const std::vector<const char*>& parameterNames, double& parameterValue)
+	{
+		// 按候选参数名顺序依次尝试读取：兼容不同投影定义中“中央经线”可能使用的不同参数名，
+		// 例如 central_meridian / longitude_of_center / longitude_of_origin。
+		for (size_t i = 0; i < parameterNames.size(); i++)
+		{
+			if (TryGetNormProjParm(spatialReference, parameterNames[i], parameterValue))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	static inline bool IsTransverseMercatorLike(const OGRSpatialReference& spatialReference)
+	{
+		// 第一优先级：直接用 GDAL 的 UTM 识别接口。如果能识别出 UTM 分带，那么它本质上就是 TM 家族。
+		int isNorth = FALSE;
+		if (spatialReference.GetUTMZone(&isNorth) != 0)
+		{
+			return true;
+		}
+
+		// 第二优先级：读取 PROJECTION 节点名称。
+		const char* projectionName = spatialReference.GetAttrValue("PROJECTION");
+		const char* methodName = spatialReference.GetAttrValue("METHOD");
+		const char* candidateName = projectionName ? projectionName : methodName;
+		if (!candidateName)
+		{
+			return false;
+		}
+
+		// 先用 GDAL 预定义宏做“精确匹配”。
+		if (EqualsIgnoreCaseAscii(candidateName, SRS_PT_TRANSVERSE_MERCATOR) ||
+			EqualsIgnoreCaseAscii(candidateName, SRS_PT_TRANSVERSE_MERCATOR_SOUTH_ORIENTED))
+		{
+			return true;
+		}
+
+		// 再做一次更宽松的“包含”判断，兼容部分非标准命名。
+		if (ContainsIgnoreCaseAscii(candidateName, "transverse_mercator") ||
+			ContainsIgnoreCaseAscii(candidateName, "transverse mercator"))
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	static inline bool IsLambertConformalConicLike(const OGRSpatialReference& spatialReference)
+	{
+		// 读取投影名。
+		const char* projectionName = spatialReference.GetAttrValue("PROJECTION");
+		const char* methodName = spatialReference.GetAttrValue("METHOD");
+		const char* candidateName = projectionName ? projectionName : methodName;
+		if (!candidateName)
+		{
+			return false;
+		}
+
+		// 先用标准宏匹配常见 LCC 变体。
+		if (EqualsIgnoreCaseAscii(candidateName, SRS_PT_LAMBERT_CONFORMAL_CONIC_1SP) ||
+			EqualsIgnoreCaseAscii(candidateName, SRS_PT_LAMBERT_CONFORMAL_CONIC_2SP) ||
+			EqualsIgnoreCaseAscii(candidateName, SRS_PT_LAMBERT_CONFORMAL_CONIC_2SP_BELGIUM))
+		{
+			return true;
+		}
+
+		// 再兼容更宽松的字符串写法。
+		if (ContainsIgnoreCaseAscii(candidateName, "lambert_conformal_conic") ||
+			ContainsIgnoreCaseAscii(candidateName, "lambert conformal conic"))
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	static inline OGR_SRSNode* CreateLeafNode(const std::string& value)
+	{
+		return new OGR_SRSNode(value.c_str());
+	}
+
+	static inline OGR_SRSNode* CreateUsageNode(const std::string& areaName, double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg)
+	{
+		// 构造如下 WKT2 结构：
+		// USAGE[
+		//   SCOPE["Approximate area of use"],
+		//   AREA["..."],
+		//   BBOX[south, west, north, east]
+		// ]
+		//
+		// 这里显式使用 BBOX 的 south / west / north / east 顺序，避免与常见的 xmin / ymin / xmax / ymax 习惯混淆。
+		OGR_SRSNode* const usageNode = new OGR_SRSNode("USAGE");
+
+		OGR_SRSNode* const scopeNode = new OGR_SRSNode("SCOPE");
+		scopeNode->AddChild(CreateLeafNode("Approximate area of use"));
+		usageNode->AddChild(scopeNode);
+
+		OGR_SRSNode* const areaNode = new OGR_SRSNode("AREA");
+		areaNode->AddChild(CreateLeafNode(areaName));
+		usageNode->AddChild(areaNode);
+
+		OGR_SRSNode* const bboxNode = new OGR_SRSNode("BBOX");
+		bboxNode->AddChild(CreateLeafNode(FormatDouble(southLatitudeDeg)));
+		bboxNode->AddChild(CreateLeafNode(FormatDouble(westLongitudeDeg)));
+		bboxNode->AddChild(CreateLeafNode(FormatDouble(northLatitudeDeg)));
+		bboxNode->AddChild(CreateLeafNode(FormatDouble(eastLongitudeDeg)));
+		usageNode->AddChild(bboxNode);
+
+		return usageNode;
+	}
+
+	static inline bool TryComputeAreaOfUseByRule(const OGRSpatialReference& spatialReference, double& westLongitudeDeg, double& southLatitudeDeg, double& eastLongitudeDeg, double& northLatitudeDeg, std::string& areaName)
+	{
+		// 只处理投影坐标系。
+		if (!spatialReference.IsProjected() && !spatialReference.IsDerivedProjected())
+		{
+			return false;
+		}
+
+		// 先尝试识别是否为 UTM。
+		int isNorth = FALSE;
+		const int utmZone = spatialReference.GetUTMZone(&isNorth);
+
+		// 规则（1）：
+		// 横轴墨卡托或 UTM：
+		//   经度范围 = 中央经线 ± 3°
+		//   纬度范围 = [-60°, 60°]
+		if (utmZone != 0 || IsTransverseMercatorLike(spatialReference))
+		{
+			double centralMeridianDeg = 0;
+
+			// 中央经线可能存储在不同参数名下，依次尝试。
+			const static std::vector<const char*> centralMeridianParameterNames =
+			{
+				SRS_PP_CENTRAL_MERIDIAN,
+				SRS_PP_LONGITUDE_OF_CENTER,
+				SRS_PP_LONGITUDE_OF_ORIGIN
+			};
+			const bool hasCentralMeridian = TryGetFirstExistingNormProjParm(spatialReference, centralMeridianParameterNames, centralMeridianDeg);
+
+			// 如果不是直接从参数中取到，但又已经识别为 UTM，
+			// 那么可以按照 UTM 分带规则反算中央经线：
+			// zone 1 -> -177°, zone 2 -> -171° ... zone 60 -> 177°
+			if (!hasCentralMeridian)
+			{
+				const int absUtmZone = std::abs(utmZone);
+				if (absUtmZone < 1 || absUtmZone > 60)
+				{
+					return false;
+				}
+
+				centralMeridianDeg = absUtmZone * 6.0 - 183.0;
+			}
+
+			const double normalizedCentralMeridianDeg = NormalizeLongitude(centralMeridianDeg);
+
+			westLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg - 3);
+			eastLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg + 3);
+			southLatitudeDeg = -60;
+			northLatitudeDeg = 60;
+			areaName = "Heuristic area of use for Transverse Mercator / UTM";
+			return true;
+		}
+
+		// 规则（2）：
+		// Lambert Conformal Conic:
+		//   双标准纬线：纬度总跨度 = |stdP2 - stdP1| * 1.1，以两条标准纬线中点为中心展开
+		//   单标准纬线：纬度范围 = 标准纬线 ± 3°
+		//   经度范围统一 = 中央经线 ± 30°
+		if (IsLambertConformalConicLike(spatialReference))
+		{
+			double centralMeridianDeg = 0;
+			const static std::vector<const char*> centralMeridianParameterNames =
+			{
+				SRS_PP_CENTRAL_MERIDIAN,
+				SRS_PP_LONGITUDE_OF_CENTER,
+				SRS_PP_LONGITUDE_OF_ORIGIN
+			};
+			const bool hasCentralMeridian = TryGetFirstExistingNormProjParm(spatialReference, centralMeridianParameterNames, centralMeridianDeg);
+
+			// LCC 没有中央经线则无法计算经度范围。
+			if (!hasCentralMeridian)
+			{
+				return false;
+			}
+
+			double standardParallel1Deg = 0;
+			double standardParallel2Deg = 0;
+			const bool hasStandardParallel1 = TryGetNormProjParm(spatialReference, SRS_PP_STANDARD_PARALLEL_1, standardParallel1Deg);
+			const bool hasStandardParallel2 = TryGetNormProjParm(spatialReference, SRS_PP_STANDARD_PARALLEL_2, standardParallel2Deg);
+
+			// 情况 A：双标准纬线。
+			if (hasStandardParallel1 && hasStandardParallel2)
+			{
+				const double latitudeDiffDeg = std::fabs(standardParallel2Deg - standardParallel1Deg);
+
+				// 如果两条标准纬线数值上几乎相同，
+				// 那么退化为单标准纬线情况，避免出现 0 跨度。
+				if (latitudeDiffDeg < 1e-12)
+				{
+					southLatitudeDeg = ClampLatitude(standardParallel1Deg - 3);
+					northLatitudeDeg = ClampLatitude(standardParallel1Deg + 3);
+				}
+				else
+				{
+					// 1) 先取两条标准纬线的中点作为中心；
+					// 2) 总纬度跨度 = 纬度差 * 1.1；
+					// 3) 向上下各展开一半。
+					const double centerLatitudeDeg = (standardParallel1Deg + standardParallel2Deg) * 0.5;
+					const double latitudeSpanDeg = latitudeDiffDeg * 1.1;
+					const double halfLatitudeSpanDeg = latitudeSpanDeg * 0.5;
+
+					southLatitudeDeg = ClampLatitude(centerLatitudeDeg - halfLatitudeSpanDeg);
+					northLatitudeDeg = ClampLatitude(centerLatitudeDeg + halfLatitudeSpanDeg);
+				}
+			}
+			else
+			{
+				// 情况 B：单标准纬线。
+				// 优先取 standard_parallel_1；若没有，再看 standard_parallel_2。
+				// 某些 1SP 定义里可能没有显式标准纬线，这时退回 latitude_of_origin。
+				double singleStandardParallelDeg = 0;
+				if (hasStandardParallel1)
+				{
+					singleStandardParallelDeg = standardParallel1Deg;
+				}
+				else if (hasStandardParallel2)
+				{
+					singleStandardParallelDeg = standardParallel2Deg;
+				}
+				else
+				{
+					if (!TryGetNormProjParm(spatialReference, SRS_PP_LATITUDE_OF_ORIGIN, singleStandardParallelDeg))
+					{
+						return false;
+					}
+				}
+
+				southLatitudeDeg = ClampLatitude(singleStandardParallelDeg - 3);
+				northLatitudeDeg = ClampLatitude(singleStandardParallelDeg + 3);
+			}
+
+			const double normalizedCentralMeridianDeg = NormalizeLongitude(centralMeridianDeg);
+			westLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg - 30);
+			eastLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg + 30);
+			areaName = "Heuristic area of use for Lambert Conformal Conic";
+			return true;
+		}
+
+		// 规则（3）：其它投影不处理。
+		return false;
+	}
+
+	static bool ApplyUsageNodeToSpatialReference(OGRSpatialReference& spatialReference, double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg, const std::string& areaName)
+	{
+		//  1) 先导出成 WKT2；
+		//  2) 再导入到一个临时 SRS；
+		//  3) 在临时 SRS 的根节点上插入 USAGE 节点；
+		//  4) 再导出并重新导回原对象。
+		//
+		// 好处：
+		//   - 能确保修改的是 WKT2 结构；
+		//   - 避免对原对象做半完成状态的直接修改；
+		//   - 更便于统一验证和失败回滚。
+
+		const char* exportOptions[] =
+		{
+			"FORMAT=WKT2_2019",
+			nullptr
+		};
+
+		char* wkt2Text = nullptr;
+		if (spatialReference.exportToWkt(&wkt2Text, exportOptions) != OGRERR_NONE || wkt2Text == nullptr)
+		{
+			if (wkt2Text)
+			{
+				CPLFree(wkt2Text);
+			}
+			return false;
+		}
+
+		OGRSpatialReference wkt2SpatialReference;
+		const std::string wkt2String = wkt2Text;
+		CPLFree(wkt2Text);
+		wkt2Text = nullptr;
+
+		// 用导出的 WKT2 构造一个临时 SRS。
+		if (wkt2SpatialReference.importFromWkt(wkt2String.c_str()) != OGRERR_NONE)
+		{
+			return false;
+		}
+
+		OGR_SRSNode* const rootNode = wkt2SpatialReference.GetRoot();
+		if (!rootNode)
+		{
+			return false;
+		}
+
+		// 先把已有的 USAGE 节点全部删掉。避免重复挂载多个 USAGE，或者保留旧的错误范围。
+		for (;;)
+		{
+			const int usageIndex = rootNode->FindChild("USAGE");
+			if (usageIndex < 0)
+			{
+				break;
+			}
+
+			rootNode->DestroyChild(usageIndex);
+		}
+
+		OGR_SRSNode* const usageNode = CreateUsageNode(areaName, westLongitudeDeg, southLatitudeDeg, eastLongitudeDeg, northLatitudeDeg);
+
+		// 为了保持 WKT 结构的整洁，如果根节点已有 ID 节点，就把 USAGE 插到 ID 前面；否则直接追加到末尾。
+		const int idIndex = rootNode->FindChild("ID");
+		if (idIndex >= 0)
+		{
+			rootNode->InsertChild(usageNode, idIndex);
+		}
+		else
+		{
+			rootNode->AddChild(usageNode);
+		}
+
+		char* updatedWkt2Text = nullptr;
+		if (wkt2SpatialReference.exportToWkt(&updatedWkt2Text, exportOptions) != OGRERR_NONE || updatedWkt2Text == nullptr)
+		{
+			if (updatedWkt2Text)
+			{
+				CPLFree(updatedWkt2Text);
+			}
+			return false;
+		}
+
+		// importFromWkt() 可能会重建内部对象，因此先记住当前对象的轴映射策略与数据轴映射关系，后面再恢复，避免破坏调用方已有设置。
+		const OSRAxisMappingStrategy axisMappingStrategy = spatialReference.GetAxisMappingStrategy();
+		const std::vector<int> dataAxisToSrsAxisMapping = spatialReference.GetDataAxisToSRSAxisMapping();
+
+		const std::string updatedWkt2String = updatedWkt2Text;
+		CPLFree(updatedWkt2Text);
+		updatedWkt2Text = nullptr;
+
+		// 把加好 USAGE 的 WKT2 重新导回原对象。
+		if (spatialReference.importFromWkt(updatedWkt2String.c_str()) != OGRERR_NONE)
+		{
+			return false;
+		}
+
+		// 恢复轴映射设置。
+		spatialReference.SetAxisMappingStrategy(axisMappingStrategy);
+		if (!dataAxisToSrsAxisMapping.empty())
+		{
+			spatialReference.SetDataAxisToSRSAxisMapping(dataAxisToSrsAxisMapping);
+		}
+
+		// 最后再调用一次 GetAreaOfUse() 做结果验证：只有当 GDAL 能够正确从修改后的 CRS 中读回 area-of-use，才认为本次写入真正成功。
+		double verifyWestLongitudeDeg = 0;
+		double verifySouthLatitudeDeg = 0;
+		double verifyEastLongitudeDeg = 0;
+		double verifyNorthLatitudeDeg = 0;
+		const char* verifyAreaName = nullptr;
+
+		return spatialReference.GetAreaOfUse(&verifyWestLongitudeDeg, &verifySouthLatitudeDeg, &verifyEastLongitudeDeg, &verifyNorthLatitudeDeg, &verifyAreaName) &&
+			IsValidAreaOfUse(verifyWestLongitudeDeg, verifySouthLatitudeDeg, verifyEastLongitudeDeg, verifyNorthLatitudeDeg);
+	}
+} // namespace
+
+bool AddExtraAreaInfo(OGRSpatialReference& spatialReference)
+{
+	// 如果对象本身已经带有合法的 area-of-use，就直接返回 true，不重复覆盖。
+	double existingWestLongitudeDeg = 0;
+	double existingSouthLatitudeDeg = 0;
+	double existingEastLongitudeDeg = 0;
+	double existingNorthLatitudeDeg = 0;
+	const char* existingAreaName = nullptr;
+
+	if (spatialReference.GetAreaOfUse(&existingWestLongitudeDeg, &existingSouthLatitudeDeg, &existingEastLongitudeDeg, &existingNorthLatitudeDeg, &existingAreaName) &&
+		internal2::IsValidAreaOfUse(existingWestLongitudeDeg, existingSouthLatitudeDeg, existingEastLongitudeDeg, existingNorthLatitudeDeg))
+	{
+		return true;
+	}
+
+	// 尝试推导一个“额外补充”的 area-of-use。
+	double westLongitudeDeg = 0;
+	double southLatitudeDeg = 0;
+	double eastLongitudeDeg = 0;
+	double northLatitudeDeg = 0;
+	std::string areaName = "";
+	if (!internal2::TryComputeAreaOfUseByRule(spatialReference, westLongitudeDeg, southLatitudeDeg, eastLongitudeDeg, northLatitudeDeg, areaName))
+	{
+		// 不属于指定投影类型，或缺少必要参数时，返回 false。
+		return false;
+	}
+
+	// 计算成功后，将 USAGE/AREA/BBOX 写回到 spatialReference。
+	return internal2::ApplyUsageNodeToSpatialReference(spatialReference, westLongitudeDeg, southLatitudeDeg, eastLongitudeDeg, northLatitudeDeg, areaName);
+}
+
+
+bool GetCartesianExtents(const std::string& wkt, double& minX, double& minY, double& maxX, double& maxY)
+{
+	OGRSpatialReference spatialReference;
+	if (spatialReference.importFromWkt(wkt.c_str()) != OGRERR_NONE)
+	{
+		return false;
+	}
+
+	const char* existingAreaName = nullptr;
+	if (spatialReference.GetAreaOfUse(&minX, &minY, &maxX, &maxY, &existingAreaName))
+	{
+		return true;
+	}
+
+	if (!AddExtraAreaInfo(spatialReference))
+	{
+		return false;
+	}
+
+	return spatialReference.GetAreaOfUse(&minX, &minY, &maxX, &maxY, &existingAreaName);
+}

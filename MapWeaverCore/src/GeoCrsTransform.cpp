@@ -134,8 +134,8 @@ namespace
             return false;
         }
 
-        const std::shared_ptr<const GeoCrs> sourceCrs = GeoCrsManager::GetFromWktCached(trimmedSourceWkt);
-        const std::shared_ptr<const GeoCrs> targetCrs = GeoCrsManager::GetFromWktCached(trimmedTargetWkt);
+        const std::shared_ptr<const GeoCrs> sourceCrs = GeoCrsManager::GetFromDefinitionCached(trimmedSourceWkt);
+        const std::shared_ptr<const GeoCrs> targetCrs = GeoCrsManager::GetFromDefinitionCached(trimmedTargetWkt);
         if (!sourceCrs || !targetCrs || !sourceCrs->IsValid() || !targetCrs->IsValid())
         {
             return false;
