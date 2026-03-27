@@ -2467,13 +2467,15 @@ namespace
 
 		for (CPLXMLNode* curNode = parent->psChild; curNode != nullptr; curNode = curNode->psNext)
 		{
-			if (curNode->eType == CXT_Element)
+			if (curNode->eType != CXT_Element)
 			{
-				const std::string nodeName = GetXmlNodeTagName(curNode);
-				if (GB_Utf8Equals(nodeName, childName, false))
-				{
-					return curNode;
-				}
+				continue;
+			}
+
+			const std::string nodeName = GetXmlNodeTagName(curNode);
+			if (XmlNodeNameEquals(nodeName, childName))
+			{
+				return curNode;
 			}
 		}
 		return nullptr;
@@ -3042,7 +3044,7 @@ namespace
 				}
 
 				const std::string keywordNodeName = GetXmlNodeTagName(keywordNode);
-				if (!GB_Utf8Equals(keywordNodeName, GB_STR("ows:Keyword"), false))
+				if (!XmlNodeNameEquals(keywordNodeName, GB_STR("ows:Keyword")))
 				{
 					continue;
 				}
@@ -3271,6 +3273,10 @@ namespace
 				}
 
 				std::string operation = GetXmlNodeTagName(curNode);
+				if (GB_Utf8StartsWith(operation, GB_STR("wms:"), false))
+				{
+					operation = GB_Utf8Substr(operation, 4);
+				}
 				if (GB_Utf8Equals(operation, GB_STR("Operation"), false))
 				{
 					operation = GetXmlNodeAttribute(curNode, GB_STR("name"));
@@ -3338,7 +3344,11 @@ namespace
 					continue;
 				}
 
-				const std::string nodeName = GetXmlNodeTagName(curNode);
+				std::string nodeName = GetXmlNodeTagName(curNode);
+				if (GB_Utf8StartsWith(nodeName, GB_STR("wms:"), false))
+				{
+					nodeName = GB_Utf8Substr(nodeName, 4);
+				}
 				if (GB_Utf8Equals(nodeName, GB_STR("HTTP"), false))
 				{
 					ParseHttp(curNode, dcpTypeProperty.http);
@@ -3540,7 +3550,7 @@ namespace
 						layerProperty.exGeographicBBox.Set(minX, minY, maxX, maxY);
 
 						const std::string srsValue = GetXmlNodeAttribute(curNode, GB_STR("SRS"));
-						if (!srsValue.empty() && !GB_Utf8Equals(nodeName, GB_STR("CRS:84"), false) && GeoCrsManager::IsDefinitionValidCached(srsValue))
+						if (!srsValue.empty() && !GB_Utf8Equals(srsValue, GB_STR("CRS:84"), false) && GeoCrsManager::IsDefinitionValidCached(srsValue))
 						{
 							// 如果 SRS 属性存在且不是 CRS:84，那么就尝试将 LatLonBoundingBox 转换到 CRS:84 坐标系下
 							const GeoBoundingBox originalBBox(GB_ToWkt(srsValue), layerProperty.exGeographicBBox);
@@ -3827,6 +3837,8 @@ namespace
 			{
 				return;
 			}
+
+			metadataUrlProperty.typeUtf8 = GetXmlNodeAttribute(rootNode, GB_STR("type"));
 
 			for (CPLXMLNode* curNode = rootNode->psChild; curNode != nullptr; curNode = curNode->psNext)
 			{
