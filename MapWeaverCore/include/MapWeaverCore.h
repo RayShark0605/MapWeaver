@@ -6,6 +6,7 @@
 #include "Geometry/GB_Polygon.h"
 #include "MapLayer.h"
 #include "ArcGISMapServiceInfo.h"
+#include <cstddef>
 #include <string>
 #include <vector>
 

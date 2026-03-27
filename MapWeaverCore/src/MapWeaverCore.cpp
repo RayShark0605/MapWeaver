@@ -25,7 +25,6 @@
 #include <iomanip>
 #include <limits>
 #include <ogr_core.h>
-#include <set>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -73,6 +72,11 @@ bool IsUrlForWMTS(const std::string& urlUtf8)
 	}
 
 	return false;
+}
+
+static inline bool IsRestfulWmtsCapabilitiesUrl(const std::string& urlUtf8)
+{
+	return GB_Utf8Find(urlUtf8, GB_STR("/WMTSCapabilities.xml"), false) >= 0;
 }
 
 static inline std::string ConvertRawBytesToUtf8(const std::string& rawBytes)
@@ -151,6 +155,19 @@ static inline std::string ConvertRawBytesToUtf8(const std::string& rawBytes)
 	}
 }
 
+static inline std::string StripUtf8Bom(const std::string& text)
+{
+	if (text.size() >= 3 &&
+		static_cast<unsigned char>(text[0]) == 0xEF &&
+		static_cast<unsigned char>(text[1]) == 0xBB &&
+		static_cast<unsigned char>(text[2]) == 0xBF)
+	{
+		return text.substr(3);
+	}
+
+	return text;
+}
+
 bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapabilitiesXmlUtf8, const GB_NetworkRequestOptions& options)
 {
 	outCapabilitiesXmlUtf8.clear();
@@ -161,6 +178,11 @@ bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapa
 		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, GB_STR("SERVICE"), GB_STR("WMS"));
 		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, GB_STR("REQUEST"), GB_STR("GetCapabilities"));
 	}
+	else if (!IsRestfulWmtsCapabilitiesUrl(urlUtf8))
+	{
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, GB_STR("SERVICE"), GB_STR("WMTS"));
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, GB_STR("REQUEST"), GB_STR("GetCapabilities"));
+	}
 
 	GB_NetworkResponse response;
 	for (int i = 0; i < 2; i++)
@@ -169,7 +191,7 @@ bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapa
 		if (response.ok)
 		{
 			const std::string& rawString = response.body;
-			outCapabilitiesXmlUtf8 = ConvertRawBytesToUtf8(rawString);
+			outCapabilitiesXmlUtf8 = StripUtf8Bom(ConvertRawBytesToUtf8(rawString));
 			return true;
 		}
 	}
@@ -179,7 +201,7 @@ bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapa
 	if (response.ok)
 	{
 		const std::string rawString = response.body;
-		outCapabilitiesXmlUtf8 = ConvertRawBytesToUtf8(rawString);
+		outCapabilitiesXmlUtf8 = StripUtf8Bom(ConvertRawBytesToUtf8(rawString));
 		return true;
 	}
 
@@ -215,6 +237,35 @@ namespace
 				return static_cast<char>(std::tolower(character));
 			});
 		return lowerText;
+	}
+
+	static bool TryFindSupportedStringIgnoreCase(const std::vector<std::string>& supportedValues, const std::string& inputValue, std::string* matchedValue)
+	{
+		if (matchedValue)
+		{
+			matchedValue->clear();
+		}
+
+		if (inputValue.empty())
+		{
+			return false;
+		}
+
+		for (size_t i = 0; i < supportedValues.size(); i++)
+		{
+			if (!GB_Utf8Equals(supportedValues[i], inputValue, false))
+			{
+				continue;
+			}
+
+			if (matchedValue)
+			{
+				*matchedValue = supportedValues[i];
+			}
+			return true;
+		}
+
+		return false;
 	}
 
 	static std::vector<std::string> SplitCommaSeparated(const std::string& text)
@@ -548,7 +599,10 @@ namespace
 		const bool hasXmax = TryGetMemberDouble(jsonObject, "xmax", &parsedExtent.m_xmax);
 		const bool hasYmax = TryGetMemberDouble(jsonObject, "ymax", &parsedExtent.m_ymax);
 
-		parsedExtent.m_isValid = hasXmin && hasYmin && hasXmax && hasYmax;
+		parsedExtent.m_isValid = hasXmin && hasYmin && hasXmax && hasYmax &&
+			std::isfinite(parsedExtent.m_xmin) && std::isfinite(parsedExtent.m_ymin) &&
+			std::isfinite(parsedExtent.m_xmax) && std::isfinite(parsedExtent.m_ymax) &&
+			parsedExtent.m_xmin <= parsedExtent.m_xmax && parsedExtent.m_ymin <= parsedExtent.m_ymax;
 
 		CPLJSONObject spatialReferenceValue;
 		if (TryGetChild(jsonObject, "spatialReference", &spatialReferenceValue))
@@ -712,33 +766,98 @@ namespace
 		*documentInfo = parsedDocumentInfo;
 	}
 
-	static void PrintJsonParseDebugInfo(const std::string& jsonText)
+	static bool TryBuildArcGisErrorMessage(const CPLJSONObject& rootObject, std::string* outErrorMessage)
 	{
-		std::cout << "GDALVersion = " << GDALVersionInfo("RELEASE_NAME") << std::endl;
-		std::cout << "JsonSize = " << jsonText.size() << std::endl;
-
-		const size_t previewLength = std::min<size_t>(jsonText.size(), 128);
-		std::cout << "JsonPreview = [" << jsonText.substr(0, previewLength) << "]" << std::endl;
-
-		std::cout << "JsonHexPreview = ";
-		for (size_t i = 0; i < previewLength; i++)
+		if (!outErrorMessage)
 		{
-			const unsigned char byteValue = static_cast<unsigned char>(jsonText[i]);
-			std::printf("%02X ", byteValue);
+			return false;
 		}
-		std::printf("\n");
 
-		CPLErrorReset();
+		outErrorMessage->clear();
 
-		CPLJSONDocument jsonDocument;
-		const bool loadSucceeded =
-			jsonDocument.LoadMemory(reinterpret_cast<const GByte*>(jsonText.data()),
-				static_cast<int>(jsonText.size()));
+		CPLJSONObject errorObject;
+		if (!TryGetChild(rootObject, "error", &errorObject) || CPLJSONObject::Type::Object != errorObject.GetType())
+		{
+			return false;
+		}
 
-		std::cout << "LoadSucceeded = " << loadSucceeded << std::endl;
-		std::cout << "LastErrorType = " << static_cast<int>(CPLGetLastErrorType()) << std::endl;
-		std::cout << "LastErrorNo = " << static_cast<int>(CPLGetLastErrorNo()) << std::endl;
-		std::cout << "LastErrorMsg = [" << CPLGetLastErrorMsg() << "]" << std::endl;
+		int errorCode = 0;
+		std::string message;
+		std::vector<std::string> detailTexts;
+
+		TryGetMemberInt(errorObject, "code", &errorCode);
+		TryGetMemberString(errorObject, "message", &message);
+
+		CPLJSONObject detailsValue;
+		if (TryGetChild(errorObject, "details", &detailsValue) && CPLJSONObject::Type::Array == detailsValue.GetType())
+		{
+			const CPLJSONArray detailsArray = detailsValue.ToArray();
+			detailTexts.reserve(static_cast<size_t>(detailsArray.Size()));
+			for (int i = 0; i < detailsArray.Size(); i++)
+			{
+				std::string detailText;
+				if (TryGetString(detailsArray[i], &detailText))
+				{
+					detailText = Trim(detailText);
+					if (!detailText.empty())
+					{
+						detailTexts.push_back(detailText);
+					}
+				}
+			}
+		}
+
+		std::ostringstream stream;
+		stream << "ArcGIS Server returned an error";
+		if (errorCode != 0)
+		{
+			stream << " (code " << errorCode << ")";
+		}
+
+		if (!message.empty())
+		{
+			stream << ": " << message;
+		}
+		else
+		{
+			stream << ".";
+		}
+
+		if (!detailTexts.empty())
+		{
+			stream << " Details: ";
+			for (size_t i = 0; i < detailTexts.size(); i++)
+			{
+				if (i > 0)
+				{
+					stream << " | ";
+				}
+				stream << detailTexts[i];
+			}
+		}
+
+		*outErrorMessage = stream.str();
+		return true;
+	}
+
+	static bool LooksLikeArcGISMapServiceInfo(const ArcGISMapServiceInfo& mapServiceInfo)
+	{
+		return !mapServiceInfo.m_currentVersion.empty() ||
+			!mapServiceInfo.m_serviceDescription.empty() ||
+			!mapServiceInfo.m_mapName.empty() ||
+			!mapServiceInfo.m_description.empty() ||
+			!mapServiceInfo.m_copyrightText.empty() ||
+			!mapServiceInfo.m_layers.empty() ||
+			!mapServiceInfo.m_tables.empty() ||
+			mapServiceInfo.m_hasSpatialReference ||
+			mapServiceInfo.m_hasTileInfo ||
+			mapServiceInfo.m_hasInitialExtent ||
+			mapServiceInfo.m_hasFullExtent ||
+			!mapServiceInfo.m_units.empty() ||
+			!mapServiceInfo.m_supportedImageFormatTypes.empty() ||
+			!mapServiceInfo.m_capabilities.empty() ||
+			!mapServiceInfo.m_supportedQueryFormats.empty() ||
+			!mapServiceInfo.m_supportedExtensions.empty();
 	}
 
 	static bool ParseArcGISMapServerJson(const std::string& jsonText, ArcGISMapServiceInfo* mapServiceInfo, std::string* errorMessage)
@@ -761,10 +880,22 @@ namespace
 			return false;
 		}
 
+		const std::string normalizedJsonText = StripUtf8Bom(jsonText);
+		if (Trim(normalizedJsonText).empty())
+		{
+			*errorMessage = "jsonText is empty after BOM/whitespace normalization.";
+			return false;
+		}
+
+		if (normalizedJsonText.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+		{
+			*errorMessage = "jsonText is too large for GDAL JSON parser.";
+			return false;
+		}
+
 		CPLErrorReset();
 		CPLJSONDocument jsonDocument;
-		if (!jsonDocument.LoadMemory(jsonText))
-			//if (!jsonDocument.LoadMemory(reinterpret_cast<const GByte*>(jsonText.data()), static_cast<int>(jsonText.size())))
+		if (!jsonDocument.LoadMemory(reinterpret_cast<const GByte*>(normalizedJsonText.data()), static_cast<int>(normalizedJsonText.size())))
 		{
 			const char* lastErrorMessage = CPLGetLastErrorMsg();
 			*errorMessage = (nullptr != lastErrorMessage && '\0' != lastErrorMessage[0]) ? lastErrorMessage : "GDAL failed to parse json text.";
@@ -775,6 +906,11 @@ namespace
 		if (!HasUsableValue(rootObject) || CPLJSONObject::Type::Object != rootObject.GetType())
 		{
 			*errorMessage = "Root JSON value is not an object.";
+			return false;
+		}
+
+		if (TryBuildArcGisErrorMessage(rootObject, errorMessage))
+		{
 			return false;
 		}
 
@@ -861,6 +997,12 @@ namespace
 		if (TryGetMemberString(rootObject, "supportedExtensions", &supportedExtensionsText))
 		{
 			parsedInfo.m_supportedExtensions = SplitCommaSeparated(supportedExtensionsText);
+		}
+
+		if (!LooksLikeArcGISMapServiceInfo(parsedInfo))
+		{
+			*errorMessage = "JSON root does not appear to be a valid ArcGIS map service description.";
+			return false;
 		}
 
 		*mapServiceInfo = parsedInfo;
@@ -1077,6 +1219,69 @@ namespace
 		return !outCanonicalWktUtf8.empty();
 	}
 
+	static bool TryCeilPositiveSizeValue(double value, size_t& outValue)
+	{
+		outValue = 0;
+
+		if (!std::isfinite(value))
+		{
+			return false;
+		}
+
+		const double ceiledValue = std::ceil(value);
+		if (!std::isfinite(ceiledValue))
+		{
+			return false;
+		}
+
+		if (ceiledValue <= 1.0)
+		{
+			outValue = 1;
+			return true;
+		}
+
+		if (static_cast<long double>(ceiledValue) > static_cast<long double>(std::numeric_limits<size_t>::max()))
+		{
+			return false;
+		}
+
+		outValue = static_cast<size_t>(ceiledValue);
+		return true;
+	}
+
+	static bool TryRoundPositiveSizeValue(double value, size_t& outValue)
+	{
+		outValue = 0;
+
+		if (!std::isfinite(value))
+		{
+			return false;
+		}
+
+		const long double minRoundSourceValue = static_cast<long double>(std::numeric_limits<long long>::min());
+		const long double maxRoundSourceValue = static_cast<long double>(std::numeric_limits<long long>::max());
+		const long double valueAsLongDouble = static_cast<long double>(value);
+		if (valueAsLongDouble < minRoundSourceValue || valueAsLongDouble > maxRoundSourceValue)
+		{
+			return false;
+		}
+
+		const long long roundedValue = std::llround(value);
+		if (roundedValue <= 1)
+		{
+			outValue = 1;
+			return true;
+		}
+
+		if (static_cast<long double>(roundedValue) > static_cast<long double>(std::numeric_limits<size_t>::max()))
+		{
+			return false;
+		}
+
+		outValue = static_cast<size_t>(roundedValue);
+		return true;
+	}
+
 	static bool TryResolveOutputImageSize(const MapRenderTargetOptions& renderTarget, double bboxWidth, double bboxHeight, size_t inputWidth, size_t inputHeight, size_t& outWidth, size_t& outHeight)
 	{
 		outWidth = inputWidth;
@@ -1097,12 +1302,18 @@ namespace
 			if (outWidth == 0 && outHeight > 0)
 			{
 				const double widthValue = static_cast<double>(outHeight) * bboxWidth / bboxHeight;
-				outWidth = static_cast<size_t>(std::max<double>(1.0, std::llround(widthValue)));
+				if (!TryRoundPositiveSizeValue(widthValue, outWidth))
+				{
+					return false;
+				}
 			}
 			else if (outHeight == 0 && outWidth > 0)
 			{
 				const double heightValue = static_cast<double>(outWidth) * bboxHeight / bboxWidth;
-				outHeight = static_cast<size_t>(std::max<double>(1.0, std::llround(heightValue)));
+				if (!TryRoundPositiveSizeValue(heightValue, outHeight))
+				{
+					return false;
+				}
 			}
 		}
 
@@ -1256,8 +1467,11 @@ namespace
 			{
 				return false;
 			}
-			width = static_cast<size_t>(std::max<double>(1.0, std::ceil(bboxWidth / targetResolution)));
-			height = static_cast<size_t>(std::max<double>(1.0, std::ceil(bboxHeight / targetResolution)));
+			if (!TryCeilPositiveSizeValue(bboxWidth / targetResolution, width) ||
+				!TryCeilPositiveSizeValue(bboxHeight / targetResolution, height))
+			{
+				return false;
+			}
 			break;
 
 		case MapRenderTargetOptions::WmsImageSizeMode::ExactWidthHeight:
@@ -1275,12 +1489,18 @@ namespace
 			if (bboxWidth >= bboxHeight)
 			{
 				width = input.renderTarget.longEdgePixels;
-				height = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(width) * bboxHeight / bboxWidth)));
+				if (!TryRoundPositiveSizeValue(static_cast<double>(width) * bboxHeight / bboxWidth, height))
+				{
+					return false;
+				}
 			}
 			else
 			{
 				height = input.renderTarget.longEdgePixels;
-				width = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(height) * bboxWidth / bboxHeight)));
+				if (!TryRoundPositiveSizeValue(static_cast<double>(height) * bboxWidth / bboxHeight, width))
+				{
+					return false;
+				}
 			}
 			break;
 
@@ -1303,23 +1523,35 @@ namespace
 			if (maxOutputImageWidth == 0)
 			{
 				height = std::max<size_t>(1, maxOutputImageHeight);
-				width = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(height) * bboxWidth / bboxHeight)));
+				if (!TryRoundPositiveSizeValue(static_cast<double>(height) * bboxWidth / bboxHeight, width))
+				{
+					return false;
+				}
 				break;
 			}
 
 			if (maxOutputImageHeight == 0)
 			{
 				width = std::max<size_t>(1, maxOutputImageWidth);
-				height = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(width) * bboxHeight / bboxWidth)));
+				if (!TryRoundPositiveSizeValue(static_cast<double>(width) * bboxHeight / bboxWidth, height))
+				{
+					return false;
+				}
 				break;
 			}
 
 			width = std::max<size_t>(1, maxOutputImageWidth);
-			height = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(width) * bboxHeight / bboxWidth)));
+			if (!TryRoundPositiveSizeValue(static_cast<double>(width) * bboxHeight / bboxWidth, height))
+			{
+				return false;
+			}
 			if (height > maxOutputImageHeight)
 			{
 				height = std::max<size_t>(1, maxOutputImageHeight);
-				width = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(height) * bboxWidth / bboxHeight)));
+				if (!TryRoundPositiveSizeValue(static_cast<double>(height) * bboxWidth / bboxHeight, width))
+				{
+					return false;
+				}
 			}
 			break;
 		}
@@ -1337,7 +1569,10 @@ namespace
 			width = static_cast<size_t>(wmsLayer.fixedWidth);
 			if (input.renderTarget.keepAspectRatio)
 			{
-				height = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(width) * bboxHeight / bboxWidth)));
+				if (!TryRoundPositiveSizeValue(static_cast<double>(width) * bboxHeight / bboxWidth, height))
+				{
+					return false;
+				}
 			}
 		}
 		else if (wmsLayer.fixedHeight > 0)
@@ -1345,7 +1580,10 @@ namespace
 			height = static_cast<size_t>(wmsLayer.fixedHeight);
 			if (input.renderTarget.keepAspectRatio)
 			{
-				width = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(height) * bboxWidth / bboxHeight)));
+				if (!TryRoundPositiveSizeValue(static_cast<double>(height) * bboxWidth / bboxHeight, width))
+				{
+					return false;
+				}
 			}
 		}
 
@@ -1355,7 +1593,10 @@ namespace
 			{
 				const double scale = static_cast<double>(serviceMaxWidth) / static_cast<double>(width);
 				width = serviceMaxWidth;
-				height = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(height) * scale)));
+				if (!TryRoundPositiveSizeValue(static_cast<double>(height) * scale, height))
+				{
+					return false;
+				}
 			}
 			else
 			{
@@ -1369,7 +1610,10 @@ namespace
 			{
 				const double scale = static_cast<double>(serviceMaxHeight) / static_cast<double>(height);
 				height = serviceMaxHeight;
-				width = static_cast<size_t>(std::max<double>(1.0, std::llround(static_cast<double>(width) * scale)));
+				if (!TryRoundPositiveSizeValue(static_cast<double>(width) * scale, width))
+				{
+					return false;
+				}
 			}
 			else
 			{
@@ -1818,8 +2062,8 @@ namespace
 			return;
 		}
 
-		const double polygonArea = polygonBoundingBox.Area();
-		if (!std::isfinite(polygonArea) || polygonArea <= 0.0 || !std::isfinite(targetResolution) || targetResolution <= 0.0)
+		const double polygonBoundingBoxArea = polygonBoundingBox.Area();
+		if (!std::isfinite(polygonBoundingBoxArea) || polygonBoundingBoxArea <= 0.0 || !std::isfinite(targetResolution) || targetResolution <= 0.0)
 		{
 			return;
 		}
@@ -1876,28 +2120,6 @@ namespace
 		}
 	}
 
-	static std::string ReplaceAllText(const std::string& text, const std::string& oldValue, const std::string& newValue)
-	{
-		if (oldValue.empty())
-		{
-			return text;
-		}
-
-		std::string result = text;
-		size_t startPosition = 0;
-		while (true)
-		{
-			const size_t foundPosition = result.find(oldValue, startPosition);
-			if (foundPosition == std::string::npos)
-			{
-				break;
-			}
-
-			result.replace(foundPosition, oldValue.size(), newValue);
-			startPosition = foundPosition + newValue.size();
-		}
-		return result;
-	}
 
 	static std::string GetDefaultDimensionValue(const WmtsDimension& dimension)
 	{
@@ -1928,6 +2150,8 @@ namespace
 		};
 		urlUtf8 = GB_UrlOperator::ReplaceUrlPathParams(urlUtf8, urlKeyValues);
 
+		std::vector<GB_UrlOperator::UrlKeyValue> dimensionKeyValues;
+		dimensionKeyValues.reserve(tileLayer.dimensions.size() * 2);
 		for (auto it = tileLayer.dimensions.begin(); it != tileLayer.dimensions.end(); it++)
 		{
 			const std::string dimensionValue = GetDefaultDimensionValue(it->second);
@@ -1936,8 +2160,16 @@ namespace
 				continue;
 			}
 
-			urlUtf8 = ReplaceAllText(urlUtf8, "{" + it->second.identifierUtf8 + "}", dimensionValue);
-			urlUtf8 = ReplaceAllText(urlUtf8, "{" + it->first + "}", dimensionValue);
+			dimensionKeyValues.push_back(GB_UrlOperator::UrlKeyValue(it->second.identifierUtf8, dimensionValue));
+			if (!GB_Utf8Equals(it->second.identifierUtf8, it->first, false))
+			{
+				dimensionKeyValues.push_back(GB_UrlOperator::UrlKeyValue(it->first, dimensionValue));
+			}
+		}
+
+		if (!dimensionKeyValues.empty())
+		{
+			urlUtf8 = GB_UrlOperator::ReplaceUrlPathParams(urlUtf8, dimensionKeyValues, true, false);
 		}
 
 		return urlUtf8;
@@ -2139,6 +2371,57 @@ namespace
 		return node->pszValue;
 	}
 
+	static inline std::string GetXmlNodeLocalName(const std::string& nodeName)
+	{
+		const size_t colonIndex = nodeName.find(':');
+		if (colonIndex == std::string::npos || colonIndex + 1 >= nodeName.size())
+		{
+			return nodeName;
+		}
+
+		return nodeName.substr(colonIndex + 1);
+	}
+
+	static inline bool XmlNodeNameEquals(const std::string& leftName, const std::string& rightName)
+	{
+		if (GB_Utf8Equals(leftName, rightName, false))
+		{
+			return true;
+		}
+
+		return GB_Utf8Equals(GetXmlNodeLocalName(leftName), GetXmlNodeLocalName(rightName), false);
+	}
+
+	static std::vector<std::string> SplitXmlWhitespaceSeparatedText(const std::string& text)
+	{
+		std::vector<std::string> parts;
+		std::string currentPart;
+		currentPart.reserve(text.size());
+
+		for (size_t i = 0; i < text.size(); i++)
+		{
+			const unsigned char currentCharacter = static_cast<unsigned char>(text[i]);
+			if (std::isspace(currentCharacter))
+			{
+				if (!currentPart.empty())
+				{
+					parts.push_back(currentPart);
+					currentPart.clear();
+				}
+				continue;
+			}
+
+			currentPart.push_back(static_cast<char>(currentCharacter));
+		}
+
+		if (!currentPart.empty())
+		{
+			parts.push_back(currentPart);
+		}
+
+		return parts;
+	}
+
 	static inline std::string GetXmlNodeAttribute(const CPLXMLNode* node, const std::string& attributeName)
 	{
 		if (!node || node->eType != CXT_Element)
@@ -2309,25 +2592,29 @@ namespace
 			parserOptions = options;
 			valid = false;
 
-			if (capabilitiesXmlUtf8.empty())
+			const std::string normalizedCapabilitiesXmlUtf8 = StripUtf8Bom(capabilitiesXmlUtf8);
+			const std::string trimmedCapabilitiesXmlUtf8 = Trim(normalizedCapabilitiesXmlUtf8);
+			if (trimmedCapabilitiesXmlUtf8.empty())
 			{
 				GBLOG_WARNING("Empty capabilities XML.");
 				return false;
 			}
 
-			if (GB_Utf8StartsWith(capabilitiesXmlUtf8, GB_STR("<html>"), false))
+			const std::string lowerTrimmedCapabilitiesXmlUtf8 = ToLowerAscii(trimmedCapabilitiesXmlUtf8);
+			if (GB_Utf8StartsWith(lowerTrimmedCapabilitiesXmlUtf8, GB_STR("<html"), false) ||
+				GB_Utf8StartsWith(lowerTrimmedCapabilitiesXmlUtf8, GB_STR("<!doctype html"), false))
 			{
 				GBLOG_WARNING("Capabilities XML appears to be an HTML page, likely an error response.");
 				return false;
 			}
 
-			if (capabilitiesXmlUtf8.find('\0') != std::string::npos)
+			if (normalizedCapabilitiesXmlUtf8.find('\0') != std::string::npos)
 			{
 				GBLOG_WARNING("Capabilities XML contains null bytes, which is unexpected and may indicate a malformed response.");
 				return false;
 			}
 
-			if (!ParseDom(capabilitiesXmlUtf8, capabilities))
+			if (!ParseDom(normalizedCapabilitiesXmlUtf8, capabilities))
 			{
 				GBLOG_WARNING("Failed to parse capabilities XML.");
 				return false;
@@ -2425,8 +2712,8 @@ namespace
 			// 检查根元素名称
 			{
 				const std::string rootName = GetXmlNodeTagName(rootNode);
-				if (!GB_Utf8Equals(rootName, GB_STR("WMS_Capabilities"), false) && !GB_Utf8Equals(rootName, GB_STR("WMT_MS_Capabilities"), false) &&
-					!GB_Utf8Equals(rootName, GB_STR("Capabilities"), false))
+				if (!XmlNodeNameEquals(rootName, GB_STR("WMS_Capabilities")) && !XmlNodeNameEquals(rootName, GB_STR("WMT_MS_Capabilities")) &&
+					!XmlNodeNameEquals(rootName, GB_STR("Capabilities")))
 				{
 					GBLOG_WARNING(GB_Utf8Format("Unexpected root element name in capabilities XML: '%s'.", rootName.c_str()));
 					return false;
@@ -2443,16 +2730,16 @@ namespace
 				}
 
 				const std::string nodeName = GetXmlNodeTagName(curNode);
-				if (GB_Utf8Equals(nodeName, GB_STR("Service"), false) || GB_Utf8Equals(nodeName, GB_STR("ows:ServiceProvider"), false) ||
-					GB_Utf8Equals(nodeName, GB_STR("ows:ServiceIdentification"), false))
+				if (XmlNodeNameEquals(nodeName, GB_STR("Service")) || XmlNodeNameEquals(nodeName, GB_STR("ows:ServiceProvider")) ||
+					XmlNodeNameEquals(nodeName, GB_STR("ows:ServiceIdentification")))
 				{
 					ParseService(curNode, capabilitiesProperty.service);
 				}
-				else if (GB_Utf8Equals(nodeName, GB_STR("Capability"), false) || GB_Utf8Equals(nodeName, GB_STR("ows:OperationsMetadata"), false))
+				else if (XmlNodeNameEquals(nodeName, GB_STR("Capability")) || XmlNodeNameEquals(nodeName, GB_STR("ows:OperationsMetadata")))
 				{
 					ParseCapability(curNode, capabilitiesProperty.capability);
 				}
-				else if (GB_Utf8Equals(nodeName, GB_STR("Contents"), false))
+				else if (XmlNodeNameEquals(nodeName, GB_STR("Contents")))
 				{
 					ParseWMTSContents(curNode);
 				}
@@ -2634,7 +2921,6 @@ namespace
 								if (operationType)
 								{
 									operationType->dcpTypes.push_back(dcp);
-									operationType->allowedEncodingsUtf8.clear();
 
 									CPLXMLNode* constraintsNode = FindChildElement(getNode, GB_STR("ows:Constraint"));
 									if (constraintsNode)
@@ -2653,7 +2939,8 @@ namespace
 												if (GB_Utf8Equals(valueNodeName, GB_STR("ows:Value"), false))
 												{
 													const std::string encodingValue = GetXmlNodeValue(valueNode);
-													if (!encodingValue.empty())
+													if (!encodingValue.empty() &&
+														std::find(operationType->allowedEncodingsUtf8.begin(), operationType->allowedEncodingsUtf8.end(), encodingValue) == operationType->allowedEncodingsUtf8.end())
 													{
 														operationType->allowedEncodingsUtf8.push_back(encodingValue);
 													}
@@ -3232,7 +3519,7 @@ namespace
 				}
 				else if (GB_Utf8Equals(nodeName, GB_STR("SRS"), false) || GB_Utf8Equals(nodeName, GB_STR("CRS"), false))
 				{
-					const std::vector<std::string> crsList = GB_Utf8Split(GetXmlNodeValue(curNode), GB_CHAR(' '));
+					const std::vector<std::string> crsList = SplitXmlWhitespaceSeparatedText(GetXmlNodeValue(curNode));
 					for (const std::string& crs : crsList)
 					{
 						if (std::find(layerProperty.crsUtf8.begin(), layerProperty.crsUtf8.end(), crs) == layerProperty.crsUtf8.end())
@@ -3758,7 +4045,7 @@ namespace
 					}
 					else if (GB_Utf8Equals(nodeName, GB_STR("Resolutions"), false))
 					{
-						resolutions = GB_Utf8Split(GB_Utf8Trim(GetXmlNodeValue(curNode)), GB_CHAR(' '));
+						resolutions = SplitXmlWhitespaceSeparatedText(GB_Utf8Trim(GetXmlNodeValue(curNode)));
 					}
 				}
 			}
@@ -3859,7 +4146,7 @@ namespace
 				}
 
 				const std::string nodeName = GetXmlNodeTagName(tileMatrixSetNode);
-				if (!GB_Utf8Equals(nodeName, GB_STR("TileMatrixSet"), false))
+				if (!XmlNodeNameEquals(nodeName, GB_STR("TileMatrixSet")))
 				{
 					continue;
 				}
@@ -3919,7 +4206,7 @@ namespace
 					}
 
 					const std::string nodeName = GetXmlNodeTagName(tileMatrixNode);
-					if (!GB_Utf8Equals(nodeName, GB_STR("TileMatrix"), false))
+					if (!XmlNodeNameEquals(nodeName, GB_STR("TileMatrix")))
 					{
 						continue;
 					}
@@ -3932,7 +4219,7 @@ namespace
 					tileMatrix.scaleDenominator = GB_ToDouble(GetXmlNodeValue(FindChildElement(tileMatrixNode, GB_STR("ScaleDenominator"))));
 
 					const std::string topLeftCornerValue = GetXmlNodeValue(FindChildElement(tileMatrixNode, GB_STR("TopLeftCorner")));
-					const std::vector<std::string> topLeftCornerParts = GB_Utf8Split(GB_Utf8Trim(topLeftCornerValue), GB_CHAR(' '));
+					const std::vector<std::string> topLeftCornerParts = SplitXmlWhitespaceSeparatedText(GB_Utf8Trim(topLeftCornerValue));
 					if (topLeftCornerParts.size() != 2)
 					{
 						GBLOG_WARNING(GB_Utf8Format("Invalid TopLeftCorner value '%s' in TileMatrix '%s' of TileMatrixSet '%s'. Expected format is 'x y'.", topLeftCornerValue.c_str(), tileMatrix.identifierUtf8.c_str(), set.identifierUtf8.c_str()));
@@ -3973,7 +4260,7 @@ namespace
 				}
 
 				const std::string nodeName = GetXmlNodeTagName(layerNode);
-				if (!GB_Utf8Equals(nodeName, GB_STR("Layer"), false))
+				if (!XmlNodeNameEquals(nodeName, GB_STR("Layer")))
 				{
 					continue;
 				}
@@ -3989,8 +4276,8 @@ namespace
 				const CPLXMLNode* wgs84BoundingBoxNode = FindChildElement(layerNode, GB_STR("ows:WGS84BoundingBox"));
 				if (wgs84BoundingBoxNode)
 				{
-					const std::vector<std::string> lowerCornerValue = GB_Utf8Split(GetXmlNodeValue(FindChildElement(wgs84BoundingBoxNode, GB_STR("ows:LowerCorner"))), GB_CHAR(' '));
-					const std::vector<std::string> upperCornerValue = GB_Utf8Split(GetXmlNodeValue(FindChildElement(wgs84BoundingBoxNode, GB_STR("ows:UpperCorner"))), GB_CHAR(' '));
+					const std::vector<std::string> lowerCornerValue = SplitXmlWhitespaceSeparatedText(GetXmlNodeValue(FindChildElement(wgs84BoundingBoxNode, GB_STR("ows:LowerCorner"))));
+					const std::vector<std::string> upperCornerValue = SplitXmlWhitespaceSeparatedText(GetXmlNodeValue(FindChildElement(wgs84BoundingBoxNode, GB_STR("ows:UpperCorner"))));
 					if (lowerCornerValue.size() == 2 && upperCornerValue.size() == 2)
 					{
 						boundingBox.wktUtf8 = GB_ToWkt("CRS:84");
@@ -4010,14 +4297,14 @@ namespace
 					}
 
 					const std::string nodeName = GetXmlNodeTagName(boundingBoxNode);
-					if (!GB_Utf8Equals(nodeName, GB_STR("ows:BoundingBox"), false))
+					if (!XmlNodeNameEquals(nodeName, GB_STR("ows:BoundingBox")))
 					{
 						continue;
 					}
 
 					boundingBox.Reset();
-					const std::vector<std::string> lowerCornerValue = GB_Utf8Split(GetXmlNodeValue(FindChildElement(boundingBoxNode, GB_STR("ows:LowerCorner"))), GB_CHAR(' '));
-					const std::vector<std::string> upperCornerValue = GB_Utf8Split(GetXmlNodeValue(FindChildElement(boundingBoxNode, GB_STR("ows:UpperCorner"))), GB_CHAR(' '));
+					const std::vector<std::string> lowerCornerValue = SplitXmlWhitespaceSeparatedText(GetXmlNodeValue(FindChildElement(boundingBoxNode, GB_STR("ows:LowerCorner"))));
+					const std::vector<std::string> upperCornerValue = SplitXmlWhitespaceSeparatedText(GetXmlNodeValue(FindChildElement(boundingBoxNode, GB_STR("ows:UpperCorner"))));
 					if (lowerCornerValue.size() != 2 || upperCornerValue.size() != 2)
 					{
 						GBLOG_WARNING(GB_Utf8Format("Invalid LowerCorner or UpperCorner value in BoundingBox of Layer '%s'. Expected format is 'x y'. This bounding box will be ignored.", tileLayer.identifierUtf8.c_str()));
@@ -4075,7 +4362,7 @@ namespace
 					}
 
 					const std::string nodeName = GetXmlNodeTagName(styleNode);
-					if (!GB_Utf8Equals(nodeName, GB_STR("Style"), false))
+					if (!XmlNodeNameEquals(nodeName, GB_STR("Style")))
 					{
 						continue;
 					}
@@ -4151,7 +4438,7 @@ namespace
 						}
 
 						const std::string nodeName = GetXmlNodeTagName(formatNode);
-						if (!GB_Utf8Equals(nodeName, GB_STR("Format"), false))
+						if (!XmlNodeNameEquals(nodeName, GB_STR("Format")))
 						{
 							continue;
 						}
@@ -4173,7 +4460,7 @@ namespace
 					}
 
 					const std::string nodeName = GetXmlNodeTagName(infoFormatNode);
-					if (!GB_Utf8Equals(nodeName, GB_STR("InfoFormat"), false))
+					if (!XmlNodeNameEquals(nodeName, GB_STR("InfoFormat")))
 					{
 						continue;
 					}
@@ -4214,7 +4501,7 @@ namespace
 					}
 
 					const std::string nodeName = GetXmlNodeTagName(dimensionNode);
-					if (!GB_Utf8Equals(nodeName, GB_STR("Dimension"), false))
+					if (!XmlNodeNameEquals(nodeName, GB_STR("Dimension")))
 					{
 						continue;
 					}
@@ -4261,7 +4548,7 @@ namespace
 					}
 
 					const std::string nodeName = GetXmlNodeTagName(setLinkNode);
-					if (!GB_Utf8Equals(nodeName, GB_STR("TileMatrixSetLink"), false))
+					if (!XmlNodeNameEquals(nodeName, GB_STR("TileMatrixSetLink")))
 					{
 						continue;
 					}
@@ -4283,7 +4570,7 @@ namespace
 						}
 
 						const std::string nodeName = GetXmlNodeTagName(setLimitsNode);
-						if (!GB_Utf8Equals(nodeName, GB_STR("TileMatrixSetLimits"), false))
+						if (!XmlNodeNameEquals(nodeName, GB_STR("TileMatrixSetLimits")))
 						{
 							continue;
 						}
@@ -4296,7 +4583,7 @@ namespace
 							}
 
 							const std::string nodeName = GetXmlNodeTagName(matrixLimitsNode);
-							if (!GB_Utf8Equals(nodeName, GB_STR("TileMatrixLimits"), false))
+							if (!XmlNodeNameEquals(nodeName, GB_STR("TileMatrixLimits")))
 							{
 								continue;
 							}
@@ -4347,7 +4634,7 @@ namespace
 					}
 
 					const std::string nodeName = GetXmlNodeTagName(resourceUrlNode);
-					if (!GB_Utf8Equals(nodeName, GB_STR("ResourceURL"), false))
+					if (!XmlNodeNameEquals(nodeName, GB_STR("ResourceURL")))
 					{
 						continue;
 					}
@@ -4408,7 +4695,7 @@ namespace
 				}
 
 				const std::string nodeName = GetXmlNodeTagName(themeNode);
-				if (!GB_Utf8Equals(nodeName, GB_STR("Theme"), false))
+				if (!XmlNodeNameEquals(nodeName, GB_STR("Theme")))
 				{
 					continue;
 				}
@@ -4459,7 +4746,7 @@ namespace
 				}
 
 				const std::string nodeName = GetXmlNodeTagName(layerRefNode);
-				if (!GB_Utf8Equals(nodeName, GB_STR("ows:LayerRef"), false))
+				if (!XmlNodeNameEquals(nodeName, GB_STR("ows:LayerRef")))
 				{
 					continue;
 				}
@@ -5088,89 +5375,173 @@ namespace
 		return "";
 	}
 
+
+	static std::string SelectAppropriateTileFormat(const WmtsTileLayer& tileLayer, bool* success = nullptr)
+	{
+		if (success)
+		{
+			*success = false;
+		}
+
+		std::vector<std::string> candidateFormats;
+		candidateFormats.reserve(std::max(tileLayer.formats.size(), tileLayer.getTileUrls.size()));
+
+		for (const auto& pair : tileLayer.getTileUrls)
+		{
+			if (!pair.first.empty())
+			{
+				candidateFormats.push_back(pair.first);
+			}
+		}
+
+		if (candidateFormats.empty())
+		{
+			candidateFormats = tileLayer.formats;
+		}
+		else
+		{
+			for (const std::string& format : tileLayer.formats)
+			{
+				if (!format.empty() && std::find(candidateFormats.begin(), candidateFormats.end(), format) == candidateFormats.end())
+				{
+					candidateFormats.push_back(format);
+				}
+			}
+		}
+
+		std::string selectedFormat = SelectAppropriateWmsFormat(candidateFormats, success);
+		if (!selectedFormat.empty())
+		{
+			return selectedFormat;
+		}
+
+		for (const std::string& format : candidateFormats)
+		{
+			if (!format.empty())
+			{
+				if (success)
+				{
+					*success = true;
+				}
+				return format;
+			}
+		}
+
+		return "";
+	}
+
 	static bool TransformGeoPolygon(const std::string& sourceWkt, const GB_Polygon& polygon, const std::string& targetWkt, std::vector<GB_Polygon>& outResult)
 	{
 		outResult.clear();
 
-		std::shared_ptr<const GeoCrs> sourceCrs = GeoCrsManager::GetFromDefinitionCached(sourceWkt);
-		if (!sourceCrs || !polygon.IsValid())
+		const std::shared_ptr<const GeoCrs> sourceCrs = GeoCrsManager::GetFromDefinitionCached(sourceWkt);
+		if (!sourceCrs || !sourceCrs->IsValid() || !polygon.IsValid())
 		{
-			GBLOG_WARNING(GB_Utf8Format("Failed to get source CRS from WKT '%s' or the input polygon is invalid. Source CRS: %s, Polygon valid: %s", sourceWkt.c_str(), sourceCrs ? "valid" : "invalid", polygon.IsValid() ? "true" : "false"));
+			GBLOG_WARNING(GB_Utf8Format("Failed to get source CRS from WKT '%s' or the input polygon is invalid. Source CRS valid: %s, Polygon valid: %s", sourceWkt.c_str(), (sourceCrs && sourceCrs->IsValid()) ? "true" : "false", polygon.IsValid() ? "true" : "false"));
 			return false;
 		}
 
-		const GeoBoundingBox srcCrsMaxBBox = sourceCrs->GetValidArea(); // 原坐标系在它自身坐标系下的最大范围
-		if (!srcCrsMaxBBox.IsValid())
+		const std::shared_ptr<const GeoCrs> targetCrs = GeoCrsManager::GetFromDefinitionCached(targetWkt);
+		if (!targetCrs || !targetCrs->IsValid())
 		{
-			GBLOG_WARNING(GB_Utf8Format("Valid area of source CRS '%s' is invalid. Source CRS: %s, Valid area: %s", sourceWkt.c_str(), sourceCrs->ExportToWktUtf8().c_str(), srcCrsMaxBBox.rect.SerializeToString().c_str()));
+			GBLOG_WARNING(GB_Utf8Format("Failed to get target CRS from WKT '%s'. Target CRS valid: %s", targetWkt.c_str(), (targetCrs && targetCrs->IsValid()) ? "true" : "false"));
 			return false;
 		}
 
-		std::vector<GB_Polygon> validSrcAreas; // 原多边形在原坐标系下的有效范围
-		std::vector<std::vector<GB_Polygon>> holes;
-		if (!polygon.ComputeIntersection(GB_Polygon(srcCrsMaxBBox.rect), validSrcAreas, holes))
+		if (*sourceCrs == *targetCrs)
 		{
-			GBLOG_WARNING(GB_Utf8Format("Failed to compute intersection of input polygon with valid area of source CRS '%s'. Source CRS: %s, Valid area: %s, Input polygon: %s", sourceWkt.c_str(), sourceCrs->ExportToWktUtf8().c_str(), srcCrsMaxBBox.rect.SerializeToString().c_str(), polygon.SerializeToString().c_str()));
-			return false;
+			outResult.push_back(polygon);
+			return true;
 		}
 
-		std::vector<GB_Polygon> validSrcAreasIn4326; // 原多边形的有效范围转换到4326坐标系下的范围
-		validSrcAreasIn4326.reserve(validSrcAreas.size());
-		for (const GB_Polygon& validSrcArea : validSrcAreas)
+		std::vector<GB_Polygon> validSourceAreas;
+		const GeoBoundingBox sourceCrsValidArea = sourceCrs->GetValidArea();
+		const bool hasSourceValidArea = sourceCrsValidArea.IsValid();
+		if (hasSourceValidArea)
 		{
-			GB_Polygon validSrcAreaIn4326;
-			if (GeoCrsTransform::TransformPolygon(sourceWkt, GB_ToWkt("EPSG:4326"), validSrcArea, validSrcAreaIn4326) && validSrcAreaIn4326.IsValid())
+			std::vector<std::vector<GB_Polygon>> holeAreas;
+			if (!polygon.ComputeIntersection(GB_Polygon(sourceCrsValidArea.rect), validSourceAreas, holeAreas))
 			{
-				validSrcAreasIn4326.push_back(std::move(validSrcAreaIn4326));
-				continue;
+				GBLOG_WARNING(GB_Utf8Format("Failed to compute intersection of input polygon with valid area of source CRS '%s'. Source CRS: %s, Valid area: %s, Input polygon: %s", sourceWkt.c_str(), sourceCrs->ExportToWktUtf8().c_str(), sourceCrsValidArea.rect.SerializeToString().c_str(), polygon.SerializeToString().c_str()));
+				return false;
+			}
+
+			if (validSourceAreas.empty())
+			{
+				GBLOG_WARNING(GB_Utf8Format("No valid intersection area between the input polygon and the valid area of source CRS '%s'. Input polygon: %s", sourceWkt.c_str(), polygon.SerializeToString().c_str()));
+				return false;
 			}
 		}
-		if (validSrcAreasIn4326.empty())
+		else
 		{
-			GBLOG_WARNING(GB_Utf8Format("Failed to transform any valid area of the input polygon to EPSG:4326. Source CRS: %s, Valid areas in source CRS: %d, Input polygon: %s", sourceWkt.c_str(), static_cast<int>(validSrcAreas.size()), polygon.SerializeToString().c_str()));
+			validSourceAreas.push_back(polygon);
+		}
+
+		const GeoBoundingBox targetCrsValidAreaIn4326 = targetCrs->GetValidAreaLonLat();
+		if (!hasSourceValidArea || !targetCrsValidAreaIn4326.IsValid())
+		{
+			outResult.reserve(validSourceAreas.size());
+			for (size_t i = 0; i < validSourceAreas.size(); i++)
+			{
+				GB_Polygon transformedPolygon;
+				if (GeoCrsTransform::TransformPolygon(sourceWkt, targetWkt, validSourceAreas[i], transformedPolygon) && transformedPolygon.IsValid())
+				{
+					outResult.push_back(std::move(transformedPolygon));
+				}
+			}
+
+			if (!outResult.empty())
+			{
+				return true;
+			}
+
+			GBLOG_WARNING(GB_Utf8Format("Failed to directly transform polygon from source CRS '%s' to target CRS '%s'. Input polygon: %s", sourceWkt.c_str(), targetWkt.c_str(), polygon.SerializeToString().c_str()));
 			return false;
 		}
 
-		std::shared_ptr<const GeoCrs> targetCrs = GeoCrsManager::GetFromDefinitionCached(targetWkt);
-		if (!targetCrs)
+		std::vector<GB_Polygon> validSourceAreasIn4326;
+		validSourceAreasIn4326.reserve(validSourceAreas.size());
+		for (size_t i = 0; i < validSourceAreas.size(); i++)
 		{
-			GBLOG_WARNING(GB_Utf8Format("Failed to get target CRS from WKT '%s'. Target CRS: %s", targetWkt.c_str(), targetCrs ? "valid" : "invalid"));
-			return false;
+			GB_Polygon validSourceAreaIn4326;
+			if (GeoCrsTransform::TransformPolygon(sourceWkt, GB_ToWkt("EPSG:4326"), validSourceAreas[i], validSourceAreaIn4326) && validSourceAreaIn4326.IsValid())
+			{
+				validSourceAreasIn4326.push_back(std::move(validSourceAreaIn4326));
+			}
 		}
-		const GeoBoundingBox targetCrsMaxBBoxIn4326 = targetCrs->GetValidAreaLonLat(); // 目标坐标系在4326坐标系下的最大范围
-		if (!targetCrsMaxBBoxIn4326.IsValid())
+		if (validSourceAreasIn4326.empty())
 		{
-			GBLOG_WARNING(GB_Utf8Format("Valid area of target CRS '%s' is invalid. Target CRS: %s, Valid area in 4326: %s", targetWkt.c_str(), targetCrs->ExportToWktUtf8().c_str(), targetCrsMaxBBoxIn4326.rect.SerializeToString().c_str()));
+			GBLOG_WARNING(GB_Utf8Format("Failed to transform any valid area of the input polygon to EPSG:4326. Source CRS: %s, Valid areas in source CRS: %d, Input polygon: %s", sourceWkt.c_str(), static_cast<int>(validSourceAreas.size()), polygon.SerializeToString().c_str()));
 			return false;
 		}
 
-		std::vector<GB_Polygon> intersectionAreasIn4326; // 原多边形的有效范围转换到4326坐标系下与目标坐标系在4326坐标系下的有效范围的交集
-		for (const GB_Polygon& validSrcAreaIn4326 : validSrcAreasIn4326)
+		std::vector<GB_Polygon> intersectionAreasIn4326;
+		for (size_t i = 0; i < validSourceAreasIn4326.size(); i++)
 		{
 			std::vector<GB_Polygon> intersectionAreas;
-			std::vector<std::vector<GB_Polygon>> intersectioHoles;
-			if (validSrcAreaIn4326.ComputeIntersection(GB_Polygon(targetCrsMaxBBoxIn4326.rect), intersectionAreas, intersectioHoles))
+			std::vector<std::vector<GB_Polygon>> intersectionHoles;
+			if (validSourceAreasIn4326[i].ComputeIntersection(GB_Polygon(targetCrsValidAreaIn4326.rect), intersectionAreas, intersectionHoles))
 			{
-				for (const GB_Polygon& intersectionArea : intersectionAreas)
+				for (size_t intersectionIndex = 0; intersectionIndex < intersectionAreas.size(); intersectionIndex++)
 				{
-					if (intersectionArea.IsValid())
+					if (intersectionAreas[intersectionIndex].IsValid())
 					{
-						intersectionAreasIn4326.push_back(intersectionArea);
+						intersectionAreasIn4326.push_back(intersectionAreas[intersectionIndex]);
 					}
 				}
 			}
 		}
 		if (intersectionAreasIn4326.empty())
 		{
-			GBLOG_WARNING(GB_Utf8Format("No intersection area between valid areas of the input polygon transformed to 4326 and the valid area of the target CRS transformed to 4326. Source CRS: %s, Target CRS: %s, Valid areas in 4326: %d, Target CRS valid area in 4326: %s, Input polygon: %s", sourceWkt.c_str(), targetWkt.c_str(), static_cast<int>(validSrcAreasIn4326.size()), targetCrsMaxBBoxIn4326.rect.SerializeToString().c_str(), polygon.SerializeToString().c_str()));
+			GBLOG_WARNING(GB_Utf8Format("No intersection area between valid areas of the input polygon transformed to 4326 and the valid area of the target CRS transformed to 4326. Source CRS: %s, Target CRS: %s, Valid areas in 4326: %d, Target CRS valid area in 4326: %s, Input polygon: %s", sourceWkt.c_str(), targetWkt.c_str(), static_cast<int>(validSourceAreasIn4326.size()), targetCrsValidAreaIn4326.rect.SerializeToString().c_str(), polygon.SerializeToString().c_str()));
 			return false;
 		}
 
 		outResult.reserve(intersectionAreasIn4326.size());
-		for (const GB_Polygon& intersectionAreaIn4326 : intersectionAreasIn4326)
+		for (size_t i = 0; i < intersectionAreasIn4326.size(); i++)
 		{
 			GB_Polygon transformedPolygon;
-			if (GeoCrsTransform::TransformPolygon(GB_ToWkt("EPSG:4326"), targetWkt, intersectionAreaIn4326, transformedPolygon) && transformedPolygon.IsValid())
+			if (GeoCrsTransform::TransformPolygon(GB_ToWkt("EPSG:4326"), targetWkt, intersectionAreasIn4326[i], transformedPolygon) && transformedPolygon.IsValid())
 			{
 				outResult.push_back(std::move(transformedPolygon));
 			}
@@ -5180,6 +5551,7 @@ namespace
 			GBLOG_WARNING(GB_Utf8Format("Failed to transform any intersection area to target CRS. Source CRS: %s, Target CRS: %s, Intersection areas in 4326: %d, Input polygon: %s", sourceWkt.c_str(), targetWkt.c_str(), static_cast<int>(intersectionAreasIn4326.size()), polygon.SerializeToString().c_str()));
 			return false;
 		}
+
 		return true;
 	}
 }
@@ -5204,7 +5576,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 	}
 
 	std::vector<MapRequestItem> outRequestItems;
-	std::set<std::string> usedItemUids;
+	std::unordered_set<std::string> usedItemUids;
 	std::string styleName = "";
 	std::string tileMatrixSetName = "";
 	std::string formatName = "";
@@ -5221,12 +5593,27 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		const std::vector<std::string> tileLayerStyles = GetTileLayerStyles(tileLayer);
 		if (input.styleUtf8.empty())
 		{
-			if (tileLayerStyles.size() != 1)
+			if (!tileLayer->defaultStyleUtf8.empty())
+			{
+				if (std::find(tileLayerStyles.begin(), tileLayerStyles.end(), tileLayer->defaultStyleUtf8) != tileLayerStyles.end())
+				{
+					styleName = tileLayer->defaultStyleUtf8;
+				}
+				else
+				{
+					GBLOG_WARNING(GB_Utf8Format("Default style '%s' of tile layer '%s' is not present in the parsed style list.", tileLayer->defaultStyleUtf8.c_str(), input.layerNameUtf8.c_str()));
+					return {};
+				}
+			}
+			else if (tileLayerStyles.size() == 1)
+			{
+				styleName = tileLayerStyles[0];
+			}
+			else
 			{
 				GBLOG_WARNING(GB_Utf8Format("Style is not specified for tile layer '%s', and there are %d styles available. Unable to determine which style to use.", input.layerNameUtf8.c_str(), static_cast<int>(tileLayerStyles.size())));
 				return {};
 			}
-			styleName = tileLayerStyles[0];
 		}
 		else
 		{
@@ -5261,21 +5648,20 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		const std::vector<std::string>& formats = tileLayer->formats;
 		if (input.formatUtf8.empty())
 		{
-			if (formats.size() != 1)
+			formatName = SelectAppropriateTileFormat(*tileLayer);
+			if (formatName.empty())
 			{
-				GBLOG_WARNING(GB_Utf8Format("Format is not specified for tile layer '%s', and there are %d formats available. Unable to determine which format to use.", input.layerNameUtf8.c_str(), static_cast<int>(formats.size())));
+				GBLOG_WARNING(GB_Utf8Format("Unable to determine an appropriate WMTS format for tile layer '%s'.", input.layerNameUtf8.c_str()));
 				return {};
 			}
-			formatName = formats[0];
 		}
 		else
 		{
-			if (std::find(formats.begin(), formats.end(), input.formatUtf8) == formats.end())
+			if (!TryFindSupportedStringIgnoreCase(formats, input.formatUtf8, &formatName))
 			{
 				GBLOG_WARNING(GB_Utf8Format("Format '%s' not found for tile layer '%s'.", input.formatUtf8.c_str(), input.layerNameUtf8.c_str()));
 				return {};
 			}
-			formatName = input.formatUtf8;
 		}
 
 		const WmtsTileMatrixSet* tileMatrixSet = nullptr;
@@ -5427,19 +5813,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		const std::vector<std::string> wmsLayerStyles = GetWmsLayerStyles(wmsLayer);
 		if (input.styleUtf8.empty())
 		{
-			if (wmsLayerStyles.empty())
-			{
-				styleName.clear();
-			}
-			else if (wmsLayerStyles.size() == 1)
-			{
-				styleName = wmsLayerStyles[0];
-			}
-			else
-			{
-				GBLOG_WARNING(GB_Utf8Format("Style is not specified for layer '%s', and there are %d styles available. Unable to determine which style to use.", input.layerNameUtf8.c_str(), static_cast<int>(wmsLayerStyles.size())));
-				return {};
-			}
+			styleName.clear();
 		}
 		else
 		{
@@ -5463,12 +5837,11 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		}
 		else
 		{
-			if (std::find(formats.begin(), formats.end(), input.formatUtf8) == formats.end())
+			if (!TryFindSupportedStringIgnoreCase(formats, input.formatUtf8, &formatName))
 			{
 				GBLOG_WARNING(GB_Utf8Format("Format '%s' not found for GetMap request.", input.formatUtf8.c_str()));
 				return {};
 			}
-			formatName = input.formatUtf8;
 		}
 
 		const std::string wmsLayerCrsDefinitionUtf8 = wmsLayer->PreferredAvailableCrs();
@@ -5562,7 +5935,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 
 	if (success)
 	{
-		*success = true;
+		*success = !outRequestItems.empty();
 	}
 	return outRequestItems;
 }
