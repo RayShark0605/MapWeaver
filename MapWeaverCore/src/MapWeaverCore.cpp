@@ -5451,1238 +5451,1238 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 }
 
 
-#include <cstdlib>
-#include <locale>
-#include <memory>
-#include <string>
-
-namespace internal
-{
-	struct CplFreeDeleter
-	{
-		void operator()(char* text) const
-		{
-			if (text != nullptr)
-			{
-				CPLFree(text);
-			}
-		}
-	};
-
-	static std::string NormalizeToken(const std::string& text)
-	{
-		std::string normalized;
-		normalized.reserve(text.size());
-
-		for (size_t i = 0; i < text.size(); i++)
-		{
-			const unsigned char character = static_cast<unsigned char>(text[i]);
-
-			if ((character >= 'a' && character <= 'z') ||
-				(character >= '0' && character <= '9'))
-			{
-				normalized.push_back(static_cast<char>(character));
-			}
-			else if (character >= 'A' && character <= 'Z')
-			{
-				normalized.push_back(static_cast<char>(character - 'A' + 'a'));
-			}
-		}
-
-		return normalized;
-	}
-
-	static bool IsOnlyTrailingAsciiWhitespace(const char* text)
-	{
-		if (text == nullptr)
-		{
-			return true;
-		}
-
-		while (*text != '\0')
-		{
-			if (*text != ' ' &&
-				*text != '\t' &&
-				*text != '\r' &&
-				*text != '\n' &&
-				*text != '\f' &&
-				*text != '\v')
-			{
-				return false;
-			}
-			text++;
-		}
-
-		return true;
-	}
-
-	static bool TryImportSpatialReference(const std::string& wkt, OGRSpatialReference& spatialReference)
-	{
-		if (wkt.empty())
-		{
-			return false;
-		}
-
-		const char* current = wkt.c_str();
-		if (spatialReference.importFromWkt(&current) != OGRERR_NONE)
-		{
-			return false;
-		}
-
-		return IsOnlyTrailingAsciiWhitespace(current);
-	}
-
-	static bool TryImportSrsNode(const std::string& wkt, OGR_SRSNode& rootNode)
-	{
-		if (wkt.empty())
-		{
-			return false;
-		}
-
-		const char* current = wkt.c_str();
-		if (rootNode.importFromWkt(&current) != OGRERR_NONE)
-		{
-			return false;
-		}
-
-		return IsOnlyTrailingAsciiWhitespace(current);
-	}
-
-	static bool TryExportToWktWithFormat(const OGRSpatialReference& spatialReference, const char* formatName, std::string& outputWkt)
-	{
-		const std::string formatOption = std::string("FORMAT=") + formatName;
-		const char* options[] =
-		{
-			formatOption.c_str(),
-			nullptr
-		};
-
-		char* rawWkt = nullptr;
-		if (spatialReference.exportToWkt(&rawWkt, options) != OGRERR_NONE || rawWkt == nullptr)
-		{
-			return false;
-		}
-
-		std::unique_ptr<char, CplFreeDeleter> wktHolder(rawWkt);
-		outputWkt.assign(wktHolder.get());
-		return true;
-	}
-
-	static bool TryExportToWkt2(const OGRSpatialReference& spatialReference, std::string& outputWkt)
-	{
-		static const char* const formatNames[] =
-		{
-			"WKT2_2019",
-			"WKT2_2018",
-			"WKT2"
-		};
-
-		for (size_t i = 0; i < sizeof(formatNames) / sizeof(formatNames[0]); i++)
-		{
-			if (TryExportToWktWithFormat(spatialReference, formatNames[i], outputWkt))
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	static bool HasExplicitAreaAndBbox(const OGR_SRSNode* node)
-	{
-		if (node == nullptr)
-		{
-			return false;
-		}
-
-		return node->GetNode("AREA") != nullptr && node->GetNode("BBOX") != nullptr;
-	}
-
-	static bool IsTransverseMercator(const OGRSpatialReference& spatialReference)
-	{
-		const char* projectionName = spatialReference.GetAttrValue("PROJECTION");
-		if (projectionName != nullptr)
-		{
-			if (NormalizeToken(projectionName) == NormalizeToken(SRS_PT_TRANSVERSE_MERCATOR))
-			{
-				return true;
-			}
-		}
-
-		const char* methodName = spatialReference.GetAttrValue("METHOD");
-		if (methodName != nullptr)
-		{
-			if (NormalizeToken(methodName) == "transversemercator")
-			{
-				return true;
-			}
-		}
-
-		methodName = spatialReference.GetAttrValue("CONVERSION|METHOD");
-		if (methodName != nullptr)
-		{
-			if (NormalizeToken(methodName) == "transversemercator")
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	static bool TryParseDouble(const char* text, double& value)
-	{
-		if (text == nullptr || *text == '\0')
-		{
-			return false;
-		}
-
-		char* endPtr = nullptr;
-		value = std::strtod(text, &endPtr);
-		if (endPtr == text)
-		{
-			return false;
-		}
-
-		return IsOnlyTrailingAsciiWhitespace(endPtr) && std::isfinite(value);
-	}
-
-	static bool IsCentralMeridianParameterName(const char* parameterName)
-	{
-		if (parameterName == nullptr)
-		{
-			return false;
-		}
-
-		const std::string normalizedName = NormalizeToken(parameterName);
-		return normalizedName == "centralmeridian" ||
-			normalizedName == "longitudeoforigin" ||
-			normalizedName == "longitudeofnaturalorigin";
-	}
-
-	static bool TryGetCentralMeridianFromTree(const OGR_SRSNode* node, double& centralMeridianDeg)
-	{
-		if (node == nullptr)
-		{
-			return false;
-		}
-
-		if (NormalizeToken(node->GetValue()) == "parameter" && node->GetChildCount() >= 2)
-		{
-			const OGR_SRSNode* parameterNameNode = node->GetChild(0);
-			const OGR_SRSNode* parameterValueNode = node->GetChild(1);
-
-			if (parameterNameNode != nullptr &&
-				parameterValueNode != nullptr &&
-				IsCentralMeridianParameterName(parameterNameNode->GetValue()))
-			{
-				if (TryParseDouble(parameterValueNode->GetValue(), centralMeridianDeg))
-				{
-					return true;
-				}
-			}
-		}
-
-		for (int childIndex = 0; childIndex < node->GetChildCount(); childIndex++)
-		{
-			if (TryGetCentralMeridianFromTree(node->GetChild(childIndex), centralMeridianDeg))
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	static bool TryGetCentralMeridian(const OGRSpatialReference& spatialReference, double& centralMeridianDeg)
-	{
-		static const char* const parameterNames[] =
-		{
-			SRS_PP_CENTRAL_MERIDIAN,
-			SRS_PP_LONGITUDE_OF_ORIGIN
-		};
-
-		for (size_t i = 0; i < sizeof(parameterNames) / sizeof(parameterNames[0]); i++)
-		{
-			OGRErr errorCode = OGRERR_FAILURE;
-			const double value = spatialReference.GetNormProjParm(parameterNames[i], 0.0, &errorCode);
-			if (errorCode == OGRERR_NONE && std::isfinite(value))
-			{
-				centralMeridianDeg = value;
-				return true;
-			}
-		}
-
-		return TryGetCentralMeridianFromTree(spatialReference.GetRoot(), centralMeridianDeg);
-	}
-
-	static std::string FormatDouble(double value)
-	{
-		std::ostringstream stream;
-		stream.imbue(std::locale::classic());
-		stream << std::setprecision(15) << value;
-		return stream.str();
-	}
-
-	static std::string FormatLongitudeLabel(double longitudeDeg)
-	{
-		if (!std::isfinite(longitudeDeg))
-		{
-			return std::string();
-		}
-
-		const double absoluteLongitude = std::abs(longitudeDeg);
-		if (absoluteLongitude == 0.0)
-		{
-			return "0";
-		}
-
-		return FormatDouble(absoluteLongitude) + (longitudeDeg > 0.0 ? "E" : "W");
-	}
-
-	static OGR_SRSNode* CreateLeafNode(const std::string& value)
-	{
-		return new OGR_SRSNode(value.c_str());
-	}
-
-	static OGR_SRSNode* CreateSingleStringChildNode(const char* nodeName, const std::string& text)
-	{
-		OGR_SRSNode* node = new OGR_SRSNode(nodeName);
-		node->AddChild(CreateLeafNode(text));
-		return node;
-	}
-
-	static OGR_SRSNode* CreateBboxNode(double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg)
-	{
-		OGR_SRSNode* bboxNode = new OGR_SRSNode("BBOX");
-		bboxNode->AddChild(CreateLeafNode(FormatDouble(southLatitudeDeg)));
-		bboxNode->AddChild(CreateLeafNode(FormatDouble(westLongitudeDeg)));
-		bboxNode->AddChild(CreateLeafNode(FormatDouble(northLatitudeDeg)));
-		bboxNode->AddChild(CreateLeafNode(FormatDouble(eastLongitudeDeg)));
-		return bboxNode;
-	}
-
-	static OGR_SRSNode* CreateUsageNode(double westLongitudeDeg, double eastLongitudeDeg)
-	{
-		OGR_SRSNode* usageNode = new OGR_SRSNode("USAGE");
-		usageNode->AddChild(CreateSingleStringChildNode("SCOPE", "Custom area derived from central meridian."));
-		usageNode->AddChild(CreateSingleStringChildNode("AREA", std::string("Between ") + FormatLongitudeLabel(westLongitudeDeg) + " and " + FormatLongitudeLabel(eastLongitudeDeg) + "."));
-		usageNode->AddChild(CreateBboxNode(westLongitudeDeg, -85.0, eastLongitudeDeg, 85.0));
-		return usageNode;
-	}
-
-	static int FindUsageInsertChildIndex(const OGR_SRSNode& rootNode)
-	{
-		for (int childIndex = 0; childIndex < rootNode.GetChildCount(); childIndex++)
-		{
-			const OGR_SRSNode* childNode = rootNode.GetChild(childIndex);
-			if (childNode == nullptr)
-			{
-				continue;
-			}
-
-			const std::string normalizedValue = NormalizeToken(childNode->GetValue());
-			if (normalizedValue == "id" || normalizedValue == "remark")
-			{
-				return childIndex;
-			}
-		}
-
-		return rootNode.GetChildCount();
-	}
-
-	static bool InjectUsageAreaBboxIntoWkt2(std::string& wkt2Text, double westLongitudeDeg, double eastLongitudeDeg)
-	{
-		OGR_SRSNode rootNode;
-		if (!TryImportSrsNode(wkt2Text, rootNode))
-		{
-			return false;
-		}
-
-		const std::string normalizedRootValue = NormalizeToken(rootNode.GetValue());
-		if (normalizedRootValue != "projcrs" &&
-			normalizedRootValue != "projectedcrs" &&
-			normalizedRootValue != "derivedprojcrs")
-		{
-			return false;
-		}
-
-		if (HasExplicitAreaAndBbox(&rootNode))
-		{
-			return true;
-		}
-
-		OGR_SRSNode* usageNode = rootNode.GetNode("USAGE");
-		if (usageNode == nullptr)
-		{
-			usageNode = CreateUsageNode(westLongitudeDeg, eastLongitudeDeg);
-			rootNode.InsertChild(usageNode, FindUsageInsertChildIndex(rootNode));
-		}
-		else
-		{
-			if (usageNode->FindChild("SCOPE") < 0)
-			{
-				usageNode->InsertChild(CreateSingleStringChildNode("SCOPE", "Custom area derived from central meridian."), 0);
-			}
-
-			if (usageNode->FindChild("AREA") < 0)
-			{
-				usageNode->AddChild(CreateSingleStringChildNode("AREA", std::string("Between ") + FormatLongitudeLabel(westLongitudeDeg) + " and " + FormatLongitudeLabel(eastLongitudeDeg) + "."));
-			}
-
-			if (usageNode->FindChild("BBOX") < 0)
-			{
-				usageNode->AddChild(CreateBboxNode(westLongitudeDeg, -85.0, eastLongitudeDeg, 85.0));
-			}
-		}
-
-		char* rawWkt = nullptr;
-		if (rootNode.exportToWkt(&rawWkt) != OGRERR_NONE || rawWkt == nullptr)
-		{
-			return false;
-		}
-
-		std::unique_ptr<char, CplFreeDeleter> wktHolder(rawWkt);
-		wkt2Text.assign(wktHolder.get());
-		return true;
-	}
-}
-
-bool TryExportWkt2WithCustomTransverseMercatorAreaBbox(const std::string& inputWkt, std::string& outputWkt2, bool* areaBboxInjected)
-{
-	outputWkt2.clear();
-
-	if (areaBboxInjected != nullptr)
-	{
-		*areaBboxInjected = false;
-	}
-
-	OGRSpatialReference spatialReference;
-	if (!internal::TryImportSpatialReference(inputWkt, spatialReference))
-	{
-		return false;
-	}
-
-	if (!internal::TryExportToWkt2(spatialReference, outputWkt2))
-	{
-		return false;
-	}
-
-	if (!spatialReference.IsProjected())
-	{
-		return true;
-	}
-
-	if (!internal::IsTransverseMercator(spatialReference))
-	{
-		return true;
-	}
-
-	if (internal::HasExplicitAreaAndBbox(spatialReference.GetRoot()))
-	{
-		return true;
-	}
-
-	double centralMeridianDeg = 0.0;
-	if (!internal::TryGetCentralMeridian(spatialReference, centralMeridianDeg))
-	{
-		return true;
-	}
-
-	const double westLongitudeDeg = centralMeridianDeg - 3.0;
-	const double eastLongitudeDeg = centralMeridianDeg + 3.0;
-
-	if (!internal::InjectUsageAreaBboxIntoWkt2(outputWkt2, westLongitudeDeg, eastLongitudeDeg))
-	{
-		return false;
-	}
-
-	if (areaBboxInjected != nullptr)
-	{
-		*areaBboxInjected = true;
-	}
-
-	return true;
-}
-
-#include "proj.h"
-#include <algorithm>
-
-static inline std::string GetProjErrorMessage(PJ_CONTEXT* context)
-{
-	if (!context)
-	{
-		return "PROJ context is null.";
-	}
-
-	const int errorCode = proj_context_errno(context);
-	const char* errorText = proj_context_errno_string(context, errorCode);
-	if (errorText)
-	{
-		return std::string(errorText);
-	}
-
-	return "Unknown PROJ error.";
-}
-
-struct Bounds2D_
-{
-	double minX = 0;
-	double minY = 0;
-	double maxX = 0;
-	double maxY = 0;
-};
-static inline bool TransformBoundsInternal(PJ_CONTEXT* context, PJ* transform, double minX, double minY, double maxX, double maxY, Bounds2D_& outputBounds, std::string* errorMessage)
-{
-	double outMinX = 0;
-	double outMinY = 0;
-	double outMaxX = 0;
-	double outMaxY = 0;
-
-	const int ok = proj_trans_bounds(context, transform, PJ_FWD, minX, minY, maxX, maxY, &outMinX, &outMinY, &outMaxX, &outMaxY, 21);
-	if (!ok)
-	{
-		if (errorMessage)
-		{
-			*errorMessage = GetProjErrorMessage(context);
-		}
-		return false;
-	}
-
-	outputBounds.minX = outMinX;
-	outputBounds.minY = outMinY;
-	outputBounds.maxX = outMaxX;
-	outputBounds.maxY = outMaxY;
-	return true;
-}
-
-static inline bool GetCrsAreaOfUseDegreesFromWkt(const std::string& wkt, Bounds2D_& areaOfUseBounds, std::string* errorMessage = nullptr)
-{
-	using ContextPtr = std::unique_ptr<PJ_CONTEXT, decltype(&proj_context_destroy)>;
-	using PjPtr = std::unique_ptr<PJ, decltype(&proj_destroy)>;
-
-	ContextPtr context(proj_context_create(), &proj_context_destroy);
-	if (!context)
-	{
-		if (errorMessage)
-		{
-			*errorMessage = "Failed to create PROJ context.";
-		}
-		return false;
-	}
-
-	PROJ_STRING_LIST warnings = nullptr;
-	PROJ_STRING_LIST grammarErrors = nullptr;
-
-	PjPtr crs(proj_create_from_wkt(context.get(), wkt.c_str(), nullptr, &warnings, &grammarErrors), &proj_destroy);
-
-	proj_string_list_destroy(warnings);
-	proj_string_list_destroy(grammarErrors);
-
-	if (!crs)
-	{
-		if (errorMessage)
-		{
-			*errorMessage = GetProjErrorMessage(context.get());
-		}
-		return false;
-	}
-
-	if (!proj_is_crs(crs.get()))
-	{
-		if (errorMessage)
-		{
-			*errorMessage = "The WKT does not describe a CRS object.";
-		}
-		return false;
-	}
-
-	const char* areaName = nullptr;
-	const int ok = proj_get_area_of_use(context.get(), crs.get(), &areaOfUseBounds.minX, &areaOfUseBounds.minY, &areaOfUseBounds.maxX, &areaOfUseBounds.maxY, &areaName);
-
-	if (!ok)
-	{
-		if (errorMessage)
-		{
-			*errorMessage = "Area of use is unknown for this WKT/CRS.";
-		}
-		return false;
-	}
-
-	return true;
-}
-
-static inline bool GetCrsEnvelopeInOwnUnitsFromWkt(const std::string& wkt, Bounds2D_& envelopeBounds, std::string* errorMessage = nullptr)
-{
-	using ContextPtr = std::unique_ptr<PJ_CONTEXT, decltype(&proj_context_destroy)>;
-	using PjPtr = std::unique_ptr<PJ, decltype(&proj_destroy)>;
-
-	ContextPtr context(proj_context_create(), &proj_context_destroy);
-	if (!context)
-	{
-		if (errorMessage)
-		{
-			*errorMessage = "Failed to create PROJ context.";
-		}
-		return false;
-	}
-
-	PROJ_STRING_LIST warnings = nullptr;
-	PROJ_STRING_LIST grammarErrors = nullptr;
-
-	PjPtr crs(proj_create_from_wkt(context.get(), wkt.c_str(), nullptr, &warnings, &grammarErrors), &proj_destroy);
-
-	proj_string_list_destroy(warnings);
-	proj_string_list_destroy(grammarErrors);
-
-	if (!crs)
-	{
-		if (errorMessage)
-		{
-			*errorMessage = GetProjErrorMessage(context.get());
-		}
-		return false;
-	}
-
-	if (!proj_is_crs(crs.get()))
-	{
-		if (errorMessage)
-		{
-			*errorMessage = "The WKT does not describe a CRS object.";
-		}
-		return false;
-	}
-
-	double westLon = 0;
-	double southLat = 0;
-	double eastLon = 0;
-	double northLat = 0;
-	const char* areaName = nullptr;
-
-	const int gotArea = proj_get_area_of_use(context.get(), crs.get(), &westLon, &southLat, &eastLon, &northLat, &areaName);
-
-	if (!gotArea)
-	{
-		if (errorMessage)
-		{
-			*errorMessage = "Area of use is unknown for this WKT/CRS, so projected bounds cannot be inferred reliably.";
-		}
-		return false;
-	}
-
-	PjPtr geodeticCrs(proj_crs_get_geodetic_crs(context.get(), crs.get()), &proj_destroy);
-	if (!geodeticCrs)
-	{
-		if (errorMessage)
-		{
-			*errorMessage = GetProjErrorMessage(context.get());
-		}
-		return false;
-	}
-
-	PjPtr transform(proj_create_crs_to_crs_from_pj(context.get(), geodeticCrs.get(), crs.get(), nullptr, nullptr), &proj_destroy);
-
-	if (!transform)
-	{
-		if (errorMessage)
-		{
-			*errorMessage = GetProjErrorMessage(context.get());
-		}
-		return false;
-	}
-
-	PjPtr normalizedTransform(proj_normalize_for_visualization(context.get(), transform.get()), &proj_destroy);
-
-	PJ* transformToUse = normalizedTransform ? normalizedTransform.get() : transform.get();
-
-	// 常见情况：westLon <= eastLon
-	if (westLon <= eastLon)
-	{
-		return TransformBoundsInternal(context.get(), transformToUse, westLon, southLat, eastLon, northLat, envelopeBounds, errorMessage);
-	}
-
-	// 保守处理：若 area of use 跨越反经线，则拆成两个范围分别投影后再合并
-	Bounds2D_ firstPartBounds;
-	Bounds2D_ secondPartBounds;
-
-	if (!TransformBoundsInternal(context.get(), transformToUse, westLon, southLat, 180, northLat, firstPartBounds, errorMessage))
-	{
-		return false;
-	}
-
-	if (!TransformBoundsInternal(context.get(), transformToUse, -180, southLat, eastLon, northLat, secondPartBounds, errorMessage))
-	{
-		return false;
-	}
-
-	envelopeBounds.minX = std::min(firstPartBounds.minX, secondPartBounds.minX);
-	envelopeBounds.minY = std::min(firstPartBounds.minY, secondPartBounds.minY);
-	envelopeBounds.maxX = std::max(firstPartBounds.maxX, secondPartBounds.maxX);
-	envelopeBounds.maxY = std::max(firstPartBounds.maxY, secondPartBounds.maxY);
-	return true;
-}
-
-//bool GetCartesianExtents(const std::string& wkt, double& minX, double& minY, double& maxX, double& maxY)
+////#include <cstdlib>
+//#include <locale>
+//#include <memory>
+//#include <string>
+////
+////namespace internal
+////{
+////	struct CplFreeDeleter
+////	{
+////		void operator()(char* text) const
+//		{
+//			if (text != nullptr)
+//			{
+//				CPLFree(text);
+//			}
+//		}
+////	};
+////
+////	static std::string NormalizeToken(const std::string& text)
+//	{
+//		std::string normalized;
+//		normalized.reserve(text.size());
+//
+//		for (size_t i = 0; i < text.size(); i++)
+//		{
+//			const unsigned char character = static_cast<unsigned char>(text[i]);
+//
+//			if ((character >= 'a' && character <= 'z') ||
+//				(character >= '0' && character <= '9'))
+//			{
+//				normalized.push_back(static_cast<char>(character));
+//			}
+//			else if (character >= 'A' && character <= 'Z')
+//			{
+//				normalized.push_back(static_cast<char>(character - 'A' + 'a'));
+//			}
+//		}
+//
+//		return normalized;
+//	}
+////
+////	static bool IsOnlyTrailingAsciiWhitespace(const char* text)
+//	{
+//		if (text == nullptr)
+//		{
+//			return true;
+//		}
+//
+//		while (*text != '\0')
+//		{
+//			if (*text != ' ' &&
+//				*text != '\t' &&
+//				*text != '\r' &&
+//				*text != '\n' &&
+//				*text != '\f' &&
+//				*text != '\v')
+//			{
+//				return false;
+//			}
+//			text++;
+//		}
+//
+//		return true;
+//	}
+////
+////	static bool TryImportSpatialReference(const std::string& wkt, OGRSpatialReference& spatialReference)
+//	{
+//		if (wkt.empty())
+//		{
+//			return false;
+//		}
+//
+//		const char* current = wkt.c_str();
+//		if (spatialReference.importFromWkt(&current) != OGRERR_NONE)
+//		{
+//			return false;
+//		}
+//
+//		return IsOnlyTrailingAsciiWhitespace(current);
+//	}
+////
+////	static bool TryImportSrsNode(const std::string& wkt, OGR_SRSNode& rootNode)
+//	{
+//		if (wkt.empty())
+//		{
+//			return false;
+//		}
+//
+//		const char* current = wkt.c_str();
+//		if (rootNode.importFromWkt(&current) != OGRERR_NONE)
+//		{
+//			return false;
+//		}
+//
+//		return IsOnlyTrailingAsciiWhitespace(current);
+//	}
+////
+////	static bool TryExportToWktWithFormat(const OGRSpatialReference& spatialReference, const char* formatName, std::string& outputWkt)
+//	{
+//		const std::string formatOption = std::string("FORMAT=") + formatName;
+//		const char* options[] =
+//		{
+//			formatOption.c_str(),
+//			nullptr
+//		};
+//
+//		char* rawWkt = nullptr;
+//		if (spatialReference.exportToWkt(&rawWkt, options) != OGRERR_NONE || rawWkt == nullptr)
+//		{
+//			return false;
+//		}
+//
+//		std::unique_ptr<char, CplFreeDeleter> wktHolder(rawWkt);
+//		outputWkt.assign(wktHolder.get());
+//		return true;
+//	}
+////
+////	static bool TryExportToWkt2(const OGRSpatialReference& spatialReference, std::string& outputWkt)
+//	{
+//		static const char* const formatNames[] =
+//		{
+//			"WKT2_2019",
+//			"WKT2_2018",
+//			"WKT2"
+//		};
+//
+//		for (size_t i = 0; i < sizeof(formatNames) / sizeof(formatNames[0]); i++)
+//		{
+//			if (TryExportToWktWithFormat(spatialReference, formatNames[i], outputWkt))
+//			{
+//				return true;
+//			}
+//		}
+//
+//		return false;
+//	}
+////
+////	static bool HasExplicitAreaAndBbox(const OGR_SRSNode* node)
+//	{
+//		if (node == nullptr)
+//		{
+//			return false;
+//		}
+//
+//		return node->GetNode("AREA") != nullptr && node->GetNode("BBOX") != nullptr;
+//	}
+////
+////	static bool IsTransverseMercator(const OGRSpatialReference& spatialReference)
+//	{
+//		const char* projectionName = spatialReference.GetAttrValue("PROJECTION");
+//		if (projectionName != nullptr)
+//		{
+//			if (NormalizeToken(projectionName) == NormalizeToken(SRS_PT_TRANSVERSE_MERCATOR))
+//			{
+//				return true;
+//			}
+//		}
+//
+//		const char* methodName = spatialReference.GetAttrValue("METHOD");
+//		if (methodName != nullptr)
+//		{
+//			if (NormalizeToken(methodName) == "transversemercator")
+//			{
+//				return true;
+//			}
+//		}
+//
+//		methodName = spatialReference.GetAttrValue("CONVERSION|METHOD");
+//		if (methodName != nullptr)
+//		{
+//			if (NormalizeToken(methodName) == "transversemercator")
+//			{
+//				return true;
+//			}
+//		}
+//
+//		return false;
+//	}
+////
+////	static bool TryParseDouble(const char* text, double& value)
+//	{
+//		if (text == nullptr || *text == '\0')
+//		{
+//			return false;
+//		}
+//
+//		char* endPtr = nullptr;
+//		value = std::strtod(text, &endPtr);
+//		if (endPtr == text)
+//		{
+//			return false;
+//		}
+//
+//		return IsOnlyTrailingAsciiWhitespace(endPtr) && std::isfinite(value);
+//	}
+////
+////	static bool IsCentralMeridianParameterName(const char* parameterName)
+//	{
+//		if (parameterName == nullptr)
+//		{
+//			return false;
+//		}
+//
+//		const std::string normalizedName = NormalizeToken(parameterName);
+//		return normalizedName == "centralmeridian" ||
+//			normalizedName == "longitudeoforigin" ||
+//			normalizedName == "longitudeofnaturalorigin";
+//	}
+////
+////	static bool TryGetCentralMeridianFromTree(const OGR_SRSNode* node, double& centralMeridianDeg)
+//	{
+//		if (node == nullptr)
+//		{
+//			return false;
+//		}
+//
+//		if (NormalizeToken(node->GetValue()) == "parameter" && node->GetChildCount() >= 2)
+//		{
+//			const OGR_SRSNode* parameterNameNode = node->GetChild(0);
+//			const OGR_SRSNode* parameterValueNode = node->GetChild(1);
+//
+//			if (parameterNameNode != nullptr &&
+//				parameterValueNode != nullptr &&
+//				IsCentralMeridianParameterName(parameterNameNode->GetValue()))
+//			{
+//				if (TryParseDouble(parameterValueNode->GetValue(), centralMeridianDeg))
+//				{
+//					return true;
+//				}
+//			}
+//		}
+//
+//		for (int childIndex = 0; childIndex < node->GetChildCount(); childIndex++)
+//		{
+//			if (TryGetCentralMeridianFromTree(node->GetChild(childIndex), centralMeridianDeg))
+//			{
+//				return true;
+//			}
+//		}
+//
+//		return false;
+//	}
+////
+////	static bool TryGetCentralMeridian(const OGRSpatialReference& spatialReference, double& centralMeridianDeg)
+//	{
+//		static const char* const parameterNames[] =
+//		{
+//			SRS_PP_CENTRAL_MERIDIAN,
+//			SRS_PP_LONGITUDE_OF_ORIGIN
+//		};
+//
+//		for (size_t i = 0; i < sizeof(parameterNames) / sizeof(parameterNames[0]); i++)
+//		{
+//			OGRErr errorCode = OGRERR_FAILURE;
+//			const double value = spatialReference.GetNormProjParm(parameterNames[i], 0.0, &errorCode);
+//			if (errorCode == OGRERR_NONE && std::isfinite(value))
+//			{
+//				centralMeridianDeg = value;
+//				return true;
+//			}
+//		}
+//
+//		return TryGetCentralMeridianFromTree(spatialReference.GetRoot(), centralMeridianDeg);
+//	}
+////
+////	static std::string FormatDouble(double value)
+//	{
+//		std::ostringstream stream;
+//		stream.imbue(std::locale::classic());
+//		stream << std::setprecision(15) << value;
+//		return stream.str();
+//	}
+////
+////	static std::string FormatLongitudeLabel(double longitudeDeg)
+//	{
+//		if (!std::isfinite(longitudeDeg))
+//		{
+//			return std::string();
+//		}
+//
+//		const double absoluteLongitude = std::abs(longitudeDeg);
+//		if (absoluteLongitude == 0.0)
+//		{
+//			return "0";
+//		}
+//
+//		return FormatDouble(absoluteLongitude) + (longitudeDeg > 0.0 ? "E" : "W");
+//	}
+////
+////	static OGR_SRSNode* CreateLeafNode(const std::string& value)
+//	{
+//		return new OGR_SRSNode(value.c_str());
+//	}
+////
+////	static OGR_SRSNode* CreateSingleStringChildNode(const char* nodeName, const std::string& text)
+//	{
+//		OGR_SRSNode* node = new OGR_SRSNode(nodeName);
+//		node->AddChild(CreateLeafNode(text));
+//		return node;
+//	}
+////
+////	static OGR_SRSNode* CreateBboxNode(double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg)
+//	{
+//		OGR_SRSNode* bboxNode = new OGR_SRSNode("BBOX");
+//		bboxNode->AddChild(CreateLeafNode(FormatDouble(southLatitudeDeg)));
+//		bboxNode->AddChild(CreateLeafNode(FormatDouble(westLongitudeDeg)));
+//		bboxNode->AddChild(CreateLeafNode(FormatDouble(northLatitudeDeg)));
+//		bboxNode->AddChild(CreateLeafNode(FormatDouble(eastLongitudeDeg)));
+//		return bboxNode;
+//	}
+////
+////	static OGR_SRSNode* CreateUsageNode(double westLongitudeDeg, double eastLongitudeDeg)
+////	{
+////		OGR_SRSNode* usageNode = new OGR_SRSNode("USAGE");
+////		usageNode->AddChild(CreateSingleStringChildNode("SCOPE", "Custom area derived from central meridian."));
+////		usageNode->AddChild(CreateSingleStringChildNode("AREA", std::string("Between ") + FormatLongitudeLabel(westLongitudeDeg) + " and " + FormatLongitudeLabel(eastLongitudeDeg) + "."));
+////		usageNode->AddChild(CreateBboxNode(westLongitudeDeg, -85.0, eastLongitudeDeg, 85.0));
+////		return usageNode;
+////	}
+////
+////	static int FindUsageInsertChildIndex(const OGR_SRSNode& rootNode)
+//	{
+//		for (int childIndex = 0; childIndex < rootNode.GetChildCount(); childIndex++)
+//		{
+//			const OGR_SRSNode* childNode = rootNode.GetChild(childIndex);
+//			if (childNode == nullptr)
+//			{
+//				continue;
+//			}
+//
+//			const std::string normalizedValue = NormalizeToken(childNode->GetValue());
+//			if (normalizedValue == "id" || normalizedValue == "remark")
+//			{
+//				return childIndex;
+//			}
+//		}
+//
+//		return rootNode.GetChildCount();
+//	}
+////
+////	static bool InjectUsageAreaBboxIntoWkt2(std::string& wkt2Text, double westLongitudeDeg, double eastLongitudeDeg)
+////	{
+////		OGR_SRSNode rootNode;
+////		if (!TryImportSrsNode(wkt2Text, rootNode))
+////		{
+////			return false;
+////		}
+////
+////		const std::string normalizedRootValue = NormalizeToken(rootNode.GetValue());
+////		if (normalizedRootValue != "projcrs" &&
+////			normalizedRootValue != "projectedcrs" &&
+////			normalizedRootValue != "derivedprojcrs")
+////		{
+////			return false;
+////		}
+////
+////		if (HasExplicitAreaAndBbox(&rootNode))
+////		{
+////			return true;
+////		}
+////
+////		OGR_SRSNode* usageNode = rootNode.GetNode("USAGE");
+////		if (usageNode == nullptr)
+////		{
+////			usageNode = CreateUsageNode(westLongitudeDeg, eastLongitudeDeg);
+////			rootNode.InsertChild(usageNode, FindUsageInsertChildIndex(rootNode));
+////		}
+////		else
+////		{
+////			if (usageNode->FindChild("SCOPE") < 0)
+////			{
+////				usageNode->InsertChild(CreateSingleStringChildNode("SCOPE", "Custom area derived from central meridian."), 0);
+////			}
+////
+////			if (usageNode->FindChild("AREA") < 0)
+////			{
+////				usageNode->AddChild(CreateSingleStringChildNode("AREA", std::string("Between ") + FormatLongitudeLabel(westLongitudeDeg) + " and " + FormatLongitudeLabel(eastLongitudeDeg) + "."));
+////			}
+////
+////			if (usageNode->FindChild("BBOX") < 0)
+////			{
+////				usageNode->AddChild(CreateBboxNode(westLongitudeDeg, -85.0, eastLongitudeDeg, 85.0));
+////			}
+////		}
+////
+////		char* rawWkt = nullptr;
+////		if (rootNode.exportToWkt(&rawWkt) != OGRERR_NONE || rawWkt == nullptr)
+////		{
+////			return false;
+////		}
+////
+////		std::unique_ptr<char, CplFreeDeleter> wktHolder(rawWkt);
+////		wkt2Text.assign(wktHolder.get());
+////		return true;
+////	}
+////}
+//
+////bool TryExportWkt2WithCustomTransverseMercatorAreaBbox(const std::string& inputWkt, std::string& outputWkt2, bool* areaBboxInjected)
 //{
-//	Bounds2D_ envelopeBounds;
-//	if (!GetCrsEnvelopeInOwnUnitsFromWkt(wkt, envelopeBounds))
+//	outputWkt2.clear();
+//
+//	if (areaBboxInjected != nullptr)
+//	{
+//		*areaBboxInjected = false;
+//	}
+//
+//	OGRSpatialReference spatialReference;
+//	if (!internal::TryImportSpatialReference(inputWkt, spatialReference))
 //	{
 //		return false;
 //	}
-//	minX = envelopeBounds.minX;
-//	minY = envelopeBounds.minY;
-//	maxX = envelopeBounds.maxX;
-//	maxY = envelopeBounds.maxY;
+//
+//	if (!internal::TryExportToWkt2(spatialReference, outputWkt2))
+//	{
+//		return false;
+//	}
+//
+//	if (!spatialReference.IsProjected())
+//	{
+//		return true;
+//	}
+//
+//	if (!internal::IsTransverseMercator(spatialReference))
+//	{
+//		return true;
+//	}
+//
+//	if (internal::HasExplicitAreaAndBbox(spatialReference.GetRoot()))
+//	{
+//		return true;
+//	}
+//
+//	double centralMeridianDeg = 0.0;
+//	if (!internal::TryGetCentralMeridian(spatialReference, centralMeridianDeg))
+//	{
+//		return true;
+//	}
+//
+//	const double westLongitudeDeg = centralMeridianDeg - 3.0;
+//	const double eastLongitudeDeg = centralMeridianDeg + 3.0;
+//
+//	if (!internal::InjectUsageAreaBboxIntoWkt2(outputWkt2, westLongitudeDeg, eastLongitudeDeg))
+//	{
+//		return false;
+//	}
+//
+//	if (areaBboxInjected != nullptr)
+//	{
+//		*areaBboxInjected = true;
+//	}
+//
 //	return true;
 //}
-
-namespace internal2
-{
-	static constexpr double kUnknownAreaOfUseMarker = -1000.0;
-	static constexpr double kAreaOfUseTolerance = 1e-12;
-
-	static inline bool IsFiniteNumber(double value)
-	{
-		return std::isfinite(value) != 0;
-	}
-
-	static inline bool IsValidAreaOfUse(double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg)
-	{
-		// GDAL may return success while values are -1000 (unknown area marker).
-		if (std::fabs(westLongitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance ||
-			std::fabs(southLatitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance ||
-			std::fabs(eastLongitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance ||
-			std::fabs(northLatitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance)
-		{
-			return false;
-		}
-
-		if (!IsFiniteNumber(westLongitudeDeg) ||
-			!IsFiniteNumber(southLatitudeDeg) ||
-			!IsFiniteNumber(eastLongitudeDeg) ||
-			!IsFiniteNumber(northLatitudeDeg))
-		{
-			return false;
-		}
-
-		if (southLatitudeDeg > northLatitudeDeg)
-		{
-			return false;
-		}
-
-		// Longitude can cross anti-meridian, so only validate each endpoint range.
-		if (westLongitudeDeg < -180.0 || westLongitudeDeg > 180.0 ||
-			eastLongitudeDeg < -180.0 || eastLongitudeDeg > 180.0)
-		{
-			return false;
-		}
-
-		if (southLatitudeDeg < -90.0 || southLatitudeDeg > 90.0 ||
-			northLatitudeDeg < -90.0 || northLatitudeDeg > 90.0)
-		{
-			return false;
-		}
-
-		return true;
-	}
-
-	static inline std::string ToLowerAscii(const std::string& text)
-	{
-		std::string lowerText = text;
-		std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), [](unsigned char character) -> char {
-			return static_cast<char>(std::tolower(character));
-			});
-		return lowerText;
-	}
-
-	static inline bool EqualsIgnoreCaseAscii(const char* leftText, const char* rightText)
-	{
-		if (!leftText || !rightText)
-		{
-			return false;
-		}
-
-		return ToLowerAscii(leftText) == ToLowerAscii(rightText);
-	}
-
-	static inline bool ContainsIgnoreCaseAscii(const char* text, const char* pattern)
-	{
-		if (!text || !pattern)
-		{
-			return false;
-		}
-
-		const std::string lowerText = ToLowerAscii(text);
-		const std::string lowerPattern = ToLowerAscii(pattern);
-		return lowerText.find(lowerPattern) != std::string::npos;
-	}
-
-	static inline std::string FormatDouble(double value)
-	{
-		std::ostringstream stream;
-		stream.imbue(std::locale::classic());
-		stream << std::setprecision(15) << value;
-		return stream.str();
-	}
-
-	static inline double ClampLatitude(double latitudeDeg)
-	{
-		return std::max(-90.0, std::min(90.0, latitudeDeg));
-	}
-
-	static inline double ClampLongitude(double longitudeDeg)
-	{
-		return std::max(-180.0, std::min(180.0, longitudeDeg));
-	}
-
-	static double NormalizeLongitude(double longitudeDeg)
-	{
-		// 为了处理例如 190、-190 这样的输入：把经度规整到 [-180, 180] 区间
-		while (longitudeDeg < -180)
-		{
-			longitudeDeg += 360;
-		}
-
-		while (longitudeDeg > 180)
-		{
-			longitudeDeg -= 360;
-		}
-
-		return longitudeDeg;
-	}
-
-	static inline bool TryGetNormProjParm(const OGRSpatialReference& spatialReference, const char* parameterName, double& parameterValue)
-	{
-		OGRErr error = OGRERR_FAILURE;
-		const double value = spatialReference.GetNormProjParm(parameterName, 0, &error);
-		if (error != OGRERR_NONE)
-		{
-			return false;
-		}
-
-		parameterValue = value;
-		return true;
-	}
-
-	static bool TryGetFirstExistingNormProjParm(const OGRSpatialReference& spatialReference, const std::vector<const char*>& parameterNames, double& parameterValue)
-	{
-		// 按候选参数名顺序依次尝试读取：兼容不同投影定义中“中央经线”可能使用的不同参数名，
-		// 例如 central_meridian / longitude_of_center / longitude_of_origin。
-		for (size_t i = 0; i < parameterNames.size(); i++)
-		{
-			if (TryGetNormProjParm(spatialReference, parameterNames[i], parameterValue))
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	static inline bool IsTransverseMercatorLike(const OGRSpatialReference& spatialReference)
-	{
-		// 第一优先级：直接用 GDAL 的 UTM 识别接口。如果能识别出 UTM 分带，那么它本质上就是 TM 家族。
-		int isNorth = FALSE;
-		if (spatialReference.GetUTMZone(&isNorth) != 0)
-		{
-			return true;
-		}
-
-		// 第二优先级：读取 PROJECTION 节点名称。
-		const char* projectionName = spatialReference.GetAttrValue("PROJECTION");
-		const char* methodName = spatialReference.GetAttrValue("METHOD");
-		const char* candidateName = projectionName ? projectionName : methodName;
-		if (!candidateName)
-		{
-			return false;
-		}
-
-		// 先用 GDAL 预定义宏做“精确匹配”。
-		if (EqualsIgnoreCaseAscii(candidateName, SRS_PT_TRANSVERSE_MERCATOR) ||
-			EqualsIgnoreCaseAscii(candidateName, SRS_PT_TRANSVERSE_MERCATOR_SOUTH_ORIENTED))
-		{
-			return true;
-		}
-
-		// 再做一次更宽松的“包含”判断，兼容部分非标准命名。
-		if (ContainsIgnoreCaseAscii(candidateName, "transverse_mercator") ||
-			ContainsIgnoreCaseAscii(candidateName, "transverse mercator"))
-		{
-			return true;
-		}
-
-		return false;
-	}
-
-	static inline bool IsLambertConformalConicLike(const OGRSpatialReference& spatialReference)
-	{
-		// 读取投影名。
-		const char* projectionName = spatialReference.GetAttrValue("PROJECTION");
-		const char* methodName = spatialReference.GetAttrValue("METHOD");
-		const char* candidateName = projectionName ? projectionName : methodName;
-		if (!candidateName)
-		{
-			return false;
-		}
-
-		// 先用标准宏匹配常见 LCC 变体。
-		if (EqualsIgnoreCaseAscii(candidateName, SRS_PT_LAMBERT_CONFORMAL_CONIC_1SP) ||
-			EqualsIgnoreCaseAscii(candidateName, SRS_PT_LAMBERT_CONFORMAL_CONIC_2SP) ||
-			EqualsIgnoreCaseAscii(candidateName, SRS_PT_LAMBERT_CONFORMAL_CONIC_2SP_BELGIUM))
-		{
-			return true;
-		}
-
-		// 再兼容更宽松的字符串写法。
-		if (ContainsIgnoreCaseAscii(candidateName, "lambert_conformal_conic") ||
-			ContainsIgnoreCaseAscii(candidateName, "lambert conformal conic"))
-		{
-			return true;
-		}
-
-		return false;
-	}
-
-	static inline OGR_SRSNode* CreateLeafNode(const std::string& value)
-	{
-		return new OGR_SRSNode(value.c_str());
-	}
-
-	static inline OGR_SRSNode* CreateUsageNode(const std::string& areaName, double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg)
-	{
-		// 构造如下 WKT2 结构：
-		// USAGE[
-		//   SCOPE["Approximate area of use"],
-		//   AREA["..."],
-		//   BBOX[south, west, north, east]
-		// ]
-		//
-		// 这里显式使用 BBOX 的 south / west / north / east 顺序，避免与常见的 xmin / ymin / xmax / ymax 习惯混淆。
-		OGR_SRSNode* const usageNode = new OGR_SRSNode("USAGE");
-
-		OGR_SRSNode* const scopeNode = new OGR_SRSNode("SCOPE");
-		scopeNode->AddChild(CreateLeafNode("Approximate area of use"));
-		usageNode->AddChild(scopeNode);
-
-		OGR_SRSNode* const areaNode = new OGR_SRSNode("AREA");
-		areaNode->AddChild(CreateLeafNode(areaName));
-		usageNode->AddChild(areaNode);
-
-		OGR_SRSNode* const bboxNode = new OGR_SRSNode("BBOX");
-		bboxNode->AddChild(CreateLeafNode(FormatDouble(southLatitudeDeg)));
-		bboxNode->AddChild(CreateLeafNode(FormatDouble(westLongitudeDeg)));
-		bboxNode->AddChild(CreateLeafNode(FormatDouble(northLatitudeDeg)));
-		bboxNode->AddChild(CreateLeafNode(FormatDouble(eastLongitudeDeg)));
-		usageNode->AddChild(bboxNode);
-
-		return usageNode;
-	}
-
-	static inline bool TryComputeAreaOfUseByRule(const OGRSpatialReference& spatialReference, double& westLongitudeDeg, double& southLatitudeDeg, double& eastLongitudeDeg, double& northLatitudeDeg, std::string& areaName)
-	{
-		// 只处理投影坐标系。
-		if (!spatialReference.IsProjected() && !spatialReference.IsDerivedProjected())
-		{
-			return false;
-		}
-
-		// 先尝试识别是否为 UTM。
-		int isNorth = FALSE;
-		const int utmZone = spatialReference.GetUTMZone(&isNorth);
-
-		// 规则（1）：
-		// 横轴墨卡托或 UTM：
-		//   经度范围 = 中央经线 ± 3°
-		//   纬度范围 = [-60°, 60°]
-		if (utmZone != 0 || IsTransverseMercatorLike(spatialReference))
-		{
-			double centralMeridianDeg = 0;
-
-			// 中央经线可能存储在不同参数名下，依次尝试。
-			const static std::vector<const char*> centralMeridianParameterNames =
-			{
-				SRS_PP_CENTRAL_MERIDIAN,
-				SRS_PP_LONGITUDE_OF_CENTER,
-				SRS_PP_LONGITUDE_OF_ORIGIN
-			};
-			const bool hasCentralMeridian = TryGetFirstExistingNormProjParm(spatialReference, centralMeridianParameterNames, centralMeridianDeg);
-
-			// 如果不是直接从参数中取到，但又已经识别为 UTM，
-			// 那么可以按照 UTM 分带规则反算中央经线：
-			// zone 1 -> -177°, zone 2 -> -171° ... zone 60 -> 177°
-			if (!hasCentralMeridian)
-			{
-				const int absUtmZone = std::abs(utmZone);
-				if (absUtmZone < 1 || absUtmZone > 60)
-				{
-					return false;
-				}
-
-				centralMeridianDeg = absUtmZone * 6.0 - 183.0;
-			}
-
-			const double normalizedCentralMeridianDeg = NormalizeLongitude(centralMeridianDeg);
-
-			westLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg - 3);
-			eastLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg + 3);
-			southLatitudeDeg = -60;
-			northLatitudeDeg = 60;
-			areaName = "Heuristic area of use for Transverse Mercator / UTM";
-			return true;
-		}
-
-		// 规则（2）：
-		// Lambert Conformal Conic:
-		//   双标准纬线：纬度总跨度 = |stdP2 - stdP1| * 1.1，以两条标准纬线中点为中心展开
-		//   单标准纬线：纬度范围 = 标准纬线 ± 3°
-		//   经度范围统一 = 中央经线 ± 30°
-		if (IsLambertConformalConicLike(spatialReference))
-		{
-			double centralMeridianDeg = 0;
-			const static std::vector<const char*> centralMeridianParameterNames =
-			{
-				SRS_PP_CENTRAL_MERIDIAN,
-				SRS_PP_LONGITUDE_OF_CENTER,
-				SRS_PP_LONGITUDE_OF_ORIGIN
-			};
-			const bool hasCentralMeridian = TryGetFirstExistingNormProjParm(spatialReference, centralMeridianParameterNames, centralMeridianDeg);
-
-			// LCC 没有中央经线则无法计算经度范围。
-			if (!hasCentralMeridian)
-			{
-				return false;
-			}
-
-			double standardParallel1Deg = 0;
-			double standardParallel2Deg = 0;
-			const bool hasStandardParallel1 = TryGetNormProjParm(spatialReference, SRS_PP_STANDARD_PARALLEL_1, standardParallel1Deg);
-			const bool hasStandardParallel2 = TryGetNormProjParm(spatialReference, SRS_PP_STANDARD_PARALLEL_2, standardParallel2Deg);
-
-			// 情况 A：双标准纬线。
-			if (hasStandardParallel1 && hasStandardParallel2)
-			{
-				const double latitudeDiffDeg = std::fabs(standardParallel2Deg - standardParallel1Deg);
-
-				// 如果两条标准纬线数值上几乎相同，
-				// 那么退化为单标准纬线情况，避免出现 0 跨度。
-				if (latitudeDiffDeg < 1e-12)
-				{
-					southLatitudeDeg = ClampLatitude(standardParallel1Deg - 3);
-					northLatitudeDeg = ClampLatitude(standardParallel1Deg + 3);
-				}
-				else
-				{
-					// 1) 先取两条标准纬线的中点作为中心；
-					// 2) 总纬度跨度 = 纬度差 * 1.1；
-					// 3) 向上下各展开一半。
-					const double centerLatitudeDeg = (standardParallel1Deg + standardParallel2Deg) * 0.5;
-					const double latitudeSpanDeg = latitudeDiffDeg * 1.1;
-					const double halfLatitudeSpanDeg = latitudeSpanDeg * 0.5;
-
-					southLatitudeDeg = ClampLatitude(centerLatitudeDeg - halfLatitudeSpanDeg);
-					northLatitudeDeg = ClampLatitude(centerLatitudeDeg + halfLatitudeSpanDeg);
-				}
-			}
-			else
-			{
-				// 情况 B：单标准纬线。
-				// 优先取 standard_parallel_1；若没有，再看 standard_parallel_2。
-				// 某些 1SP 定义里可能没有显式标准纬线，这时退回 latitude_of_origin。
-				double singleStandardParallelDeg = 0;
-				if (hasStandardParallel1)
-				{
-					singleStandardParallelDeg = standardParallel1Deg;
-				}
-				else if (hasStandardParallel2)
-				{
-					singleStandardParallelDeg = standardParallel2Deg;
-				}
-				else
-				{
-					if (!TryGetNormProjParm(spatialReference, SRS_PP_LATITUDE_OF_ORIGIN, singleStandardParallelDeg))
-					{
-						return false;
-					}
-				}
-
-				southLatitudeDeg = ClampLatitude(singleStandardParallelDeg - 3);
-				northLatitudeDeg = ClampLatitude(singleStandardParallelDeg + 3);
-			}
-
-			const double normalizedCentralMeridianDeg = NormalizeLongitude(centralMeridianDeg);
-			westLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg - 30);
-			eastLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg + 30);
-			areaName = "Heuristic area of use for Lambert Conformal Conic";
-			return true;
-		}
-
-		// 规则（3）：其它投影不处理。
-		return false;
-	}
-
-	static bool ApplyUsageNodeToSpatialReference(OGRSpatialReference& spatialReference, double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg, const std::string& areaName)
-	{
-		//  1) 先导出成 WKT2；
-		//  2) 再导入到一个临时 SRS；
-		//  3) 在临时 SRS 的根节点上插入 USAGE 节点；
-		//  4) 再导出并重新导回原对象。
-		//
-		// 好处：
-		//   - 能确保修改的是 WKT2 结构；
-		//   - 避免对原对象做半完成状态的直接修改；
-		//   - 更便于统一验证和失败回滚。
-
-		const char* exportOptions[] =
-		{
-			"FORMAT=WKT2_2019",
-			nullptr
-		};
-
-		char* wkt2Text = nullptr;
-		if (spatialReference.exportToWkt(&wkt2Text, exportOptions) != OGRERR_NONE || wkt2Text == nullptr)
-		{
-			if (wkt2Text)
-			{
-				CPLFree(wkt2Text);
-			}
-			return false;
-		}
-
-		OGRSpatialReference wkt2SpatialReference;
-		const std::string wkt2String = wkt2Text;
-		CPLFree(wkt2Text);
-		wkt2Text = nullptr;
-
-		// 用导出的 WKT2 构造一个临时 SRS。
-		if (wkt2SpatialReference.importFromWkt(wkt2String.c_str()) != OGRERR_NONE)
-		{
-			return false;
-		}
-
-		OGR_SRSNode* const rootNode = wkt2SpatialReference.GetRoot();
-		if (!rootNode)
-		{
-			return false;
-		}
-
-		// 先把已有的 USAGE 节点全部删掉。避免重复挂载多个 USAGE，或者保留旧的错误范围。
-		for (;;)
-		{
-			const int usageIndex = rootNode->FindChild("USAGE");
-			if (usageIndex < 0)
-			{
-				break;
-			}
-
-			rootNode->DestroyChild(usageIndex);
-		}
-
-		OGR_SRSNode* const usageNode = CreateUsageNode(areaName, westLongitudeDeg, southLatitudeDeg, eastLongitudeDeg, northLatitudeDeg);
-
-		// 为了保持 WKT 结构的整洁，如果根节点已有 ID 节点，就把 USAGE 插到 ID 前面；否则直接追加到末尾。
-		const int idIndex = rootNode->FindChild("ID");
-		if (idIndex >= 0)
-		{
-			rootNode->InsertChild(usageNode, idIndex);
-		}
-		else
-		{
-			rootNode->AddChild(usageNode);
-		}
-
-		char* updatedWkt2Text = nullptr;
-		if (wkt2SpatialReference.exportToWkt(&updatedWkt2Text, exportOptions) != OGRERR_NONE || updatedWkt2Text == nullptr)
-		{
-			if (updatedWkt2Text)
-			{
-				CPLFree(updatedWkt2Text);
-			}
-			return false;
-		}
-
-		// importFromWkt() 可能会重建内部对象，因此先记住当前对象的轴映射策略与数据轴映射关系，后面再恢复，避免破坏调用方已有设置。
-		const OSRAxisMappingStrategy axisMappingStrategy = spatialReference.GetAxisMappingStrategy();
-		const std::vector<int> dataAxisToSrsAxisMapping = spatialReference.GetDataAxisToSRSAxisMapping();
-
-		const std::string updatedWkt2String = updatedWkt2Text;
-		CPLFree(updatedWkt2Text);
-		updatedWkt2Text = nullptr;
-
-		// 把加好 USAGE 的 WKT2 重新导回原对象。
-		if (spatialReference.importFromWkt(updatedWkt2String.c_str()) != OGRERR_NONE)
-		{
-			return false;
-		}
-
-		// 恢复轴映射设置。
-		spatialReference.SetAxisMappingStrategy(axisMappingStrategy);
-		if (!dataAxisToSrsAxisMapping.empty())
-		{
-			spatialReference.SetDataAxisToSRSAxisMapping(dataAxisToSrsAxisMapping);
-		}
-
-		// 最后再调用一次 GetAreaOfUse() 做结果验证：只有当 GDAL 能够正确从修改后的 CRS 中读回 area-of-use，才认为本次写入真正成功。
-		double verifyWestLongitudeDeg = 0;
-		double verifySouthLatitudeDeg = 0;
-		double verifyEastLongitudeDeg = 0;
-		double verifyNorthLatitudeDeg = 0;
-		const char* verifyAreaName = nullptr;
-
-		return spatialReference.GetAreaOfUse(&verifyWestLongitudeDeg, &verifySouthLatitudeDeg, &verifyEastLongitudeDeg, &verifyNorthLatitudeDeg, &verifyAreaName) &&
-			IsValidAreaOfUse(verifyWestLongitudeDeg, verifySouthLatitudeDeg, verifyEastLongitudeDeg, verifyNorthLatitudeDeg);
-	}
-} // namespace
-
-bool AddExtraAreaInfo(OGRSpatialReference& spatialReference)
-{
-	// 如果对象本身已经带有合法的 area-of-use，就直接返回 true，不重复覆盖。
-	double existingWestLongitudeDeg = 0;
-	double existingSouthLatitudeDeg = 0;
-	double existingEastLongitudeDeg = 0;
-	double existingNorthLatitudeDeg = 0;
-	const char* existingAreaName = nullptr;
-
-	if (spatialReference.GetAreaOfUse(&existingWestLongitudeDeg, &existingSouthLatitudeDeg, &existingEastLongitudeDeg, &existingNorthLatitudeDeg, &existingAreaName) &&
-		internal2::IsValidAreaOfUse(existingWestLongitudeDeg, existingSouthLatitudeDeg, existingEastLongitudeDeg, existingNorthLatitudeDeg))
-	{
-		return true;
-	}
-
-	// 尝试推导一个“额外补充”的 area-of-use。
-	double westLongitudeDeg = 0;
-	double southLatitudeDeg = 0;
-	double eastLongitudeDeg = 0;
-	double northLatitudeDeg = 0;
-	std::string areaName = "";
-	if (!internal2::TryComputeAreaOfUseByRule(spatialReference, westLongitudeDeg, southLatitudeDeg, eastLongitudeDeg, northLatitudeDeg, areaName))
-	{
-		// 不属于指定投影类型，或缺少必要参数时，返回 false。
-		return false;
-	}
-
-	// 计算成功后，将 USAGE/AREA/BBOX 写回到 spatialReference。
-	return internal2::ApplyUsageNodeToSpatialReference(spatialReference, westLongitudeDeg, southLatitudeDeg, eastLongitudeDeg, northLatitudeDeg, areaName);
-}
-
-
-bool GetCartesianExtents(const std::string& wkt, double& minX, double& minY, double& maxX, double& maxY)
-{
-	OGRSpatialReference spatialReference;
-	if (spatialReference.importFromWkt(wkt.c_str()) != OGRERR_NONE)
-	{
-		return false;
-	}
-
-	const char* existingAreaName = nullptr;
-	if (spatialReference.GetAreaOfUse(&minX, &minY, &maxX, &maxY, &existingAreaName))
-	{
-		return true;
-	}
-
-	if (!AddExtraAreaInfo(spatialReference))
-	{
-		return false;
-	}
-
-	return spatialReference.GetAreaOfUse(&minX, &minY, &maxX, &maxY, &existingAreaName);
-}
+////
+////#include "proj.h"
+//#include <algorithm>
+////
+////static inline std::string GetProjErrorMessage(PJ_CONTEXT* context)
+//{
+//	if (!context)
+//	{
+//		return "PROJ context is null.";
+//	}
+//
+//	const int errorCode = proj_context_errno(context);
+//	const char* errorText = proj_context_errno_string(context, errorCode);
+//	if (errorText)
+//	{
+//		return std::string(errorText);
+//	}
+//
+//	return "Unknown PROJ error.";
+//}
+////
+////struct Bounds2D_
+////{
+////	double minX = 0;
+////	double minY = 0;
+////	double maxX = 0;
+////	double maxY = 0;
+////};
+////static inline bool TransformBoundsInternal(PJ_CONTEXT* context, PJ* transform, double minX, double minY, double maxX, double maxY, Bounds2D_& outputBounds, std::string* errorMessage)
+//{
+//	double outMinX = 0;
+//	double outMinY = 0;
+//	double outMaxX = 0;
+//	double outMaxY = 0;
+//
+//	const int ok = proj_trans_bounds(context, transform, PJ_FWD, minX, minY, maxX, maxY, &outMinX, &outMinY, &outMaxX, &outMaxY, 21);
+//	if (!ok)
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = GetProjErrorMessage(context);
+//		}
+//		return false;
+//	}
+//
+//	outputBounds.minX = outMinX;
+//	outputBounds.minY = outMinY;
+//	outputBounds.maxX = outMaxX;
+//	outputBounds.maxY = outMaxY;
+//	return true;
+//}
+////
+////static inline bool GetCrsAreaOfUseDegreesFromWkt(const std::string& wkt, Bounds2D_& areaOfUseBounds, std::string* errorMessage = nullptr)
+//{
+//	using ContextPtr = std::unique_ptr<PJ_CONTEXT, decltype(&proj_context_destroy)>;
+//	using PjPtr = std::unique_ptr<PJ, decltype(&proj_destroy)>;
+//
+//	ContextPtr context(proj_context_create(), &proj_context_destroy);
+//	if (!context)
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = "Failed to create PROJ context.";
+//		}
+//		return false;
+//	}
+//
+//	PROJ_STRING_LIST warnings = nullptr;
+//	PROJ_STRING_LIST grammarErrors = nullptr;
+//
+//	PjPtr crs(proj_create_from_wkt(context.get(), wkt.c_str(), nullptr, &warnings, &grammarErrors), &proj_destroy);
+//
+//	proj_string_list_destroy(warnings);
+//	proj_string_list_destroy(grammarErrors);
+//
+//	if (!crs)
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = GetProjErrorMessage(context.get());
+//		}
+//		return false;
+//	}
+//
+//	if (!proj_is_crs(crs.get()))
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = "The WKT does not describe a CRS object.";
+//		}
+//		return false;
+//	}
+//
+//	const char* areaName = nullptr;
+//	const int ok = proj_get_area_of_use(context.get(), crs.get(), &areaOfUseBounds.minX, &areaOfUseBounds.minY, &areaOfUseBounds.maxX, &areaOfUseBounds.maxY, &areaName);
+//
+//	if (!ok)
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = "Area of use is unknown for this WKT/CRS.";
+//		}
+//		return false;
+//	}
+//
+//	return true;
+//}
+////
+////static inline bool GetCrsEnvelopeInOwnUnitsFromWkt(const std::string& wkt, Bounds2D_& envelopeBounds, std::string* errorMessage = nullptr)
+//{
+//	using ContextPtr = std::unique_ptr<PJ_CONTEXT, decltype(&proj_context_destroy)>;
+//	using PjPtr = std::unique_ptr<PJ, decltype(&proj_destroy)>;
+//
+//	ContextPtr context(proj_context_create(), &proj_context_destroy);
+//	if (!context)
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = "Failed to create PROJ context.";
+//		}
+//		return false;
+//	}
+//
+//	PROJ_STRING_LIST warnings = nullptr;
+//	PROJ_STRING_LIST grammarErrors = nullptr;
+//
+//	PjPtr crs(proj_create_from_wkt(context.get(), wkt.c_str(), nullptr, &warnings, &grammarErrors), &proj_destroy);
+//
+//	proj_string_list_destroy(warnings);
+//	proj_string_list_destroy(grammarErrors);
+//
+//	if (!crs)
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = GetProjErrorMessage(context.get());
+//		}
+//		return false;
+//	}
+//
+//	if (!proj_is_crs(crs.get()))
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = "The WKT does not describe a CRS object.";
+//		}
+//		return false;
+//	}
+//
+//	double westLon = 0;
+//	double southLat = 0;
+//	double eastLon = 0;
+//	double northLat = 0;
+//	const char* areaName = nullptr;
+//
+//	const int gotArea = proj_get_area_of_use(context.get(), crs.get(), &westLon, &southLat, &eastLon, &northLat, &areaName);
+//
+//	if (!gotArea)
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = "Area of use is unknown for this WKT/CRS, so projected bounds cannot be inferred reliably.";
+//		}
+//		return false;
+//	}
+//
+//	PjPtr geodeticCrs(proj_crs_get_geodetic_crs(context.get(), crs.get()), &proj_destroy);
+//	if (!geodeticCrs)
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = GetProjErrorMessage(context.get());
+//		}
+//		return false;
+//	}
+//
+//	PjPtr transform(proj_create_crs_to_crs_from_pj(context.get(), geodeticCrs.get(), crs.get(), nullptr, nullptr), &proj_destroy);
+//
+//	if (!transform)
+//	{
+//		if (errorMessage)
+//		{
+//			*errorMessage = GetProjErrorMessage(context.get());
+//		}
+//		return false;
+//	}
+//
+//	PjPtr normalizedTransform(proj_normalize_for_visualization(context.get(), transform.get()), &proj_destroy);
+//
+//	PJ* transformToUse = normalizedTransform ? normalizedTransform.get() : transform.get();
+//
+//	// 常见情况：westLon <= eastLon
+//	if (westLon <= eastLon)
+//	{
+//		return TransformBoundsInternal(context.get(), transformToUse, westLon, southLat, eastLon, northLat, envelopeBounds, errorMessage);
+//	}
+//
+//	// 保守处理：若 area of use 跨越反经线，则拆成两个范围分别投影后再合并
+//	Bounds2D_ firstPartBounds;
+//	Bounds2D_ secondPartBounds;
+//
+//	if (!TransformBoundsInternal(context.get(), transformToUse, westLon, southLat, 180, northLat, firstPartBounds, errorMessage))
+//	{
+//		return false;
+//	}
+//
+//	if (!TransformBoundsInternal(context.get(), transformToUse, -180, southLat, eastLon, northLat, secondPartBounds, errorMessage))
+//	{
+//		return false;
+//	}
+//
+//	envelopeBounds.minX = std::min(firstPartBounds.minX, secondPartBounds.minX);
+//	envelopeBounds.minY = std::min(firstPartBounds.minY, secondPartBounds.minY);
+//	envelopeBounds.maxX = std::max(firstPartBounds.maxX, secondPartBounds.maxX);
+//	envelopeBounds.maxY = std::max(firstPartBounds.maxY, secondPartBounds.maxY);
+//	return true;
+//}
+////
+//////bool GetCartesianExtents(const std::string& wkt, double& minX, double& minY, double& maxX, double& maxY)
+//////{
+//////	Bounds2D_ envelopeBounds;
+//////	if (!GetCrsEnvelopeInOwnUnitsFromWkt(wkt, envelopeBounds))
+//////	{
+//////		return false;
+//////	}
+//////	minX = envelopeBounds.minX;
+//////	minY = envelopeBounds.minY;
+//////	maxX = envelopeBounds.maxX;
+//////	maxY = envelopeBounds.maxY;
+//////	return true;
+//////}
+////
+////namespace internal2
+////{
+////	static constexpr double kUnknownAreaOfUseMarker = -1000.0;
+////	static constexpr double kAreaOfUseTolerance = 1e-12;
+////
+////	static inline bool IsFiniteNumber(double value)
+////	{
+////		return std::isfinite(value) != 0;
+////	}
+////
+////	static inline bool IsValidAreaOfUse(double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg)
+////	{
+////		// GDAL may return success while values are -1000 (unknown area marker).
+////		if (std::fabs(westLongitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance ||
+////			std::fabs(southLatitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance ||
+////			std::fabs(eastLongitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance ||
+////			std::fabs(northLatitudeDeg - kUnknownAreaOfUseMarker) < kAreaOfUseTolerance)
+////		{
+////			return false;
+////		}
+////
+////		if (!IsFiniteNumber(westLongitudeDeg) ||
+////			!IsFiniteNumber(southLatitudeDeg) ||
+////			!IsFiniteNumber(eastLongitudeDeg) ||
+////			!IsFiniteNumber(northLatitudeDeg))
+////		{
+////			return false;
+////		}
+////
+////		if (southLatitudeDeg > northLatitudeDeg)
+////		{
+////			return false;
+////		}
+////
+////		// Longitude can cross anti-meridian, so only validate each endpoint range.
+////		if (westLongitudeDeg < -180.0 || westLongitudeDeg > 180.0 ||
+////			eastLongitudeDeg < -180.0 || eastLongitudeDeg > 180.0)
+////		{
+////			return false;
+////		}
+////
+////		if (southLatitudeDeg < -90.0 || southLatitudeDeg > 90.0 ||
+////			northLatitudeDeg < -90.0 || northLatitudeDeg > 90.0)
+////		{
+////			return false;
+////		}
+////
+////		return true;
+////	}
+////
+////	static inline std::string ToLowerAscii(const std::string& text)
+////	{
+////		std::string lowerText = text;
+////		std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), [](unsigned char character) -> char {
+////			return static_cast<char>(std::tolower(character));
+////			});
+////		return lowerText;
+////	}
+////
+////	static inline bool EqualsIgnoreCaseAscii(const char* leftText, const char* rightText)
+////	{
+////		if (!leftText || !rightText)
+////		{
+////			return false;
+////		}
+////
+////		return ToLowerAscii(leftText) == ToLowerAscii(rightText);
+////	}
+////
+////	static inline bool ContainsIgnoreCaseAscii(const char* text, const char* pattern)
+////	{
+////		if (!text || !pattern)
+////		{
+////			return false;
+////		}
+////
+////		const std::string lowerText = ToLowerAscii(text);
+////		const std::string lowerPattern = ToLowerAscii(pattern);
+////		return lowerText.find(lowerPattern) != std::string::npos;
+////	}
+////
+////	static inline std::string FormatDouble(double value)
+////	{
+////		std::ostringstream stream;
+////		stream.imbue(std::locale::classic());
+////		stream << std::setprecision(15) << value;
+////		return stream.str();
+////	}
+////
+////	static inline double ClampLatitude(double latitudeDeg)
+////	{
+////		return std::max(-90.0, std::min(90.0, latitudeDeg));
+////	}
+////
+////	static inline double ClampLongitude(double longitudeDeg)
+////	{
+////		return std::max(-180.0, std::min(180.0, longitudeDeg));
+////	}
+////
+////	static double NormalizeLongitude(double longitudeDeg)
+////	{
+////		// 为了处理例如 190、-190 这样的输入：把经度规整到 [-180, 180] 区间
+////		while (longitudeDeg < -180)
+////		{
+////			longitudeDeg += 360;
+////		}
+////
+////		while (longitudeDeg > 180)
+////		{
+////			longitudeDeg -= 360;
+////		}
+////
+////		return longitudeDeg;
+////	}
+////
+////	static inline bool TryGetNormProjParm(const OGRSpatialReference& spatialReference, const char* parameterName, double& parameterValue)
+////	{
+////		OGRErr error = OGRERR_FAILURE;
+////		const double value = spatialReference.GetNormProjParm(parameterName, 0, &error);
+////		if (error != OGRERR_NONE)
+////		{
+////			return false;
+////		}
+////
+////		parameterValue = value;
+////		return true;
+////	}
+////
+////	static bool TryGetFirstExistingNormProjParm(const OGRSpatialReference& spatialReference, const std::vector<const char*>& parameterNames, double& parameterValue)
+////	{
+////		// 按候选参数名顺序依次尝试读取：兼容不同投影定义中“中央经线”可能使用的不同参数名，
+////		// 例如 central_meridian / longitude_of_center / longitude_of_origin。
+////		for (size_t i = 0; i < parameterNames.size(); i++)
+////		{
+////			if (TryGetNormProjParm(spatialReference, parameterNames[i], parameterValue))
+////			{
+////				return true;
+////			}
+////		}
+////
+////		return false;
+////	}
+////
+////	static inline bool IsTransverseMercatorLike(const OGRSpatialReference& spatialReference)
+////	{
+////		// 第一优先级：直接用 GDAL 的 UTM 识别接口。如果能识别出 UTM 分带，那么它本质上就是 TM 家族。
+////		int isNorth = FALSE;
+////		if (spatialReference.GetUTMZone(&isNorth) != 0)
+////		{
+////			return true;
+////		}
+////
+////		// 第二优先级：读取 PROJECTION 节点名称。
+////		const char* projectionName = spatialReference.GetAttrValue("PROJECTION");
+////		const char* methodName = spatialReference.GetAttrValue("METHOD");
+////		const char* candidateName = projectionName ? projectionName : methodName;
+////		if (!candidateName)
+////		{
+////			return false;
+////		}
+////
+////		// 先用 GDAL 预定义宏做“精确匹配”。
+////		if (EqualsIgnoreCaseAscii(candidateName, SRS_PT_TRANSVERSE_MERCATOR) ||
+////			EqualsIgnoreCaseAscii(candidateName, SRS_PT_TRANSVERSE_MERCATOR_SOUTH_ORIENTED))
+////		{
+////			return true;
+////		}
+////
+////		// 再做一次更宽松的“包含”判断，兼容部分非标准命名。
+////		if (ContainsIgnoreCaseAscii(candidateName, "transverse_mercator") ||
+////			ContainsIgnoreCaseAscii(candidateName, "transverse mercator"))
+////		{
+////			return true;
+////		}
+////
+////		return false;
+////	}
+////
+////	static inline bool IsLambertConformalConicLike(const OGRSpatialReference& spatialReference)
+////	{
+////		// 读取投影名。
+////		const char* projectionName = spatialReference.GetAttrValue("PROJECTION");
+////		const char* methodName = spatialReference.GetAttrValue("METHOD");
+////		const char* candidateName = projectionName ? projectionName : methodName;
+////		if (!candidateName)
+////		{
+////			return false;
+////		}
+////
+////		// 先用标准宏匹配常见 LCC 变体。
+////		if (EqualsIgnoreCaseAscii(candidateName, SRS_PT_LAMBERT_CONFORMAL_CONIC_1SP) ||
+////			EqualsIgnoreCaseAscii(candidateName, SRS_PT_LAMBERT_CONFORMAL_CONIC_2SP) ||
+////			EqualsIgnoreCaseAscii(candidateName, SRS_PT_LAMBERT_CONFORMAL_CONIC_2SP_BELGIUM))
+////		{
+////			return true;
+////		}
+////
+////		// 再兼容更宽松的字符串写法。
+////		if (ContainsIgnoreCaseAscii(candidateName, "lambert_conformal_conic") ||
+////			ContainsIgnoreCaseAscii(candidateName, "lambert conformal conic"))
+////		{
+////			return true;
+////		}
+////
+////		return false;
+////	}
+////
+////	static inline OGR_SRSNode* CreateLeafNode(const std::string& value)
+////	{
+////		return new OGR_SRSNode(value.c_str());
+////	}
+////
+////	static inline OGR_SRSNode* CreateUsageNode(const std::string& areaName, double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg)
+////	{
+////		// 构造如下 WKT2 结构：
+////		// USAGE[
+////		//   SCOPE["Approximate area of use"],
+////		//   AREA["..."],
+////		//   BBOX[south, west, north, east]
+////		// ]
+////		//
+////		// 这里显式使用 BBOX 的 south / west / north / east 顺序，避免与常见的 xmin / ymin / xmax / ymax 习惯混淆。
+////		OGR_SRSNode* const usageNode = new OGR_SRSNode("USAGE");
+////
+////		OGR_SRSNode* const scopeNode = new OGR_SRSNode("SCOPE");
+////		scopeNode->AddChild(CreateLeafNode("Approximate area of use"));
+////		usageNode->AddChild(scopeNode);
+////
+////		OGR_SRSNode* const areaNode = new OGR_SRSNode("AREA");
+////		areaNode->AddChild(CreateLeafNode(areaName));
+////		usageNode->AddChild(areaNode);
+////
+////		OGR_SRSNode* const bboxNode = new OGR_SRSNode("BBOX");
+////		bboxNode->AddChild(CreateLeafNode(FormatDouble(southLatitudeDeg)));
+////		bboxNode->AddChild(CreateLeafNode(FormatDouble(westLongitudeDeg)));
+////		bboxNode->AddChild(CreateLeafNode(FormatDouble(northLatitudeDeg)));
+////		bboxNode->AddChild(CreateLeafNode(FormatDouble(eastLongitudeDeg)));
+////		usageNode->AddChild(bboxNode);
+////
+////		return usageNode;
+////	}
+////
+////	static inline bool TryComputeAreaOfUseByRule(const OGRSpatialReference& spatialReference, double& westLongitudeDeg, double& southLatitudeDeg, double& eastLongitudeDeg, double& northLatitudeDeg, std::string& areaName)
+////	{
+////		// 只处理投影坐标系。
+////		if (!spatialReference.IsProjected() && !spatialReference.IsDerivedProjected())
+////		{
+////			return false;
+////		}
+////
+////		// 先尝试识别是否为 UTM。
+////		int isNorth = FALSE;
+////		const int utmZone = spatialReference.GetUTMZone(&isNorth);
+////
+////		// 规则（1）：
+////		// 横轴墨卡托或 UTM：
+////		//   经度范围 = 中央经线 ± 3°
+////		//   纬度范围 = [-60°, 60°]
+////		if (utmZone != 0 || IsTransverseMercatorLike(spatialReference))
+////		{
+////			double centralMeridianDeg = 0;
+////
+////			// 中央经线可能存储在不同参数名下，依次尝试。
+////			const static std::vector<const char*> centralMeridianParameterNames =
+////			{
+////				SRS_PP_CENTRAL_MERIDIAN,
+////				SRS_PP_LONGITUDE_OF_CENTER,
+////				SRS_PP_LONGITUDE_OF_ORIGIN
+////			};
+////			const bool hasCentralMeridian = TryGetFirstExistingNormProjParm(spatialReference, centralMeridianParameterNames, centralMeridianDeg);
+////
+////			// 如果不是直接从参数中取到，但又已经识别为 UTM，
+////			// 那么可以按照 UTM 分带规则反算中央经线：
+////			// zone 1 -> -177°, zone 2 -> -171° ... zone 60 -> 177°
+////			if (!hasCentralMeridian)
+////			{
+////				const int absUtmZone = std::abs(utmZone);
+////				if (absUtmZone < 1 || absUtmZone > 60)
+////				{
+////					return false;
+////				}
+////
+////				centralMeridianDeg = absUtmZone * 6.0 - 183.0;
+////			}
+////
+////			const double normalizedCentralMeridianDeg = NormalizeLongitude(centralMeridianDeg);
+////
+////			westLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg - 3);
+////			eastLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg + 3);
+////			southLatitudeDeg = -60;
+////			northLatitudeDeg = 60;
+////			areaName = "Heuristic area of use for Transverse Mercator / UTM";
+////			return true;
+////		}
+////
+////		// 规则（2）：
+////		// Lambert Conformal Conic:
+////		//   双标准纬线：纬度总跨度 = |stdP2 - stdP1| * 1.1，以两条标准纬线中点为中心展开
+////		//   单标准纬线：纬度范围 = 标准纬线 ± 3°
+////		//   经度范围统一 = 中央经线 ± 30°
+////		if (IsLambertConformalConicLike(spatialReference))
+////		{
+////			double centralMeridianDeg = 0;
+////			const static std::vector<const char*> centralMeridianParameterNames =
+////			{
+////				SRS_PP_CENTRAL_MERIDIAN,
+////				SRS_PP_LONGITUDE_OF_CENTER,
+////				SRS_PP_LONGITUDE_OF_ORIGIN
+////			};
+////			const bool hasCentralMeridian = TryGetFirstExistingNormProjParm(spatialReference, centralMeridianParameterNames, centralMeridianDeg);
+////
+////			// LCC 没有中央经线则无法计算经度范围。
+////			if (!hasCentralMeridian)
+////			{
+////				return false;
+////			}
+////
+////			double standardParallel1Deg = 0;
+////			double standardParallel2Deg = 0;
+////			const bool hasStandardParallel1 = TryGetNormProjParm(spatialReference, SRS_PP_STANDARD_PARALLEL_1, standardParallel1Deg);
+////			const bool hasStandardParallel2 = TryGetNormProjParm(spatialReference, SRS_PP_STANDARD_PARALLEL_2, standardParallel2Deg);
+////
+////			// 情况 A：双标准纬线。
+////			if (hasStandardParallel1 && hasStandardParallel2)
+////			{
+////				const double latitudeDiffDeg = std::fabs(standardParallel2Deg - standardParallel1Deg);
+////
+////				// 如果两条标准纬线数值上几乎相同，
+////				// 那么退化为单标准纬线情况，避免出现 0 跨度。
+////				if (latitudeDiffDeg < 1e-12)
+////				{
+////					southLatitudeDeg = ClampLatitude(standardParallel1Deg - 3);
+////					northLatitudeDeg = ClampLatitude(standardParallel1Deg + 3);
+////				}
+////				else
+////				{
+////					// 1) 先取两条标准纬线的中点作为中心；
+////					// 2) 总纬度跨度 = 纬度差 * 1.1；
+////					// 3) 向上下各展开一半。
+////					const double centerLatitudeDeg = (standardParallel1Deg + standardParallel2Deg) * 0.5;
+////					const double latitudeSpanDeg = latitudeDiffDeg * 1.1;
+////					const double halfLatitudeSpanDeg = latitudeSpanDeg * 0.5;
+////
+////					southLatitudeDeg = ClampLatitude(centerLatitudeDeg - halfLatitudeSpanDeg);
+////					northLatitudeDeg = ClampLatitude(centerLatitudeDeg + halfLatitudeSpanDeg);
+////				}
+////			}
+////			else
+////			{
+////				// 情况 B：单标准纬线。
+////				// 优先取 standard_parallel_1；若没有，再看 standard_parallel_2。
+////				// 某些 1SP 定义里可能没有显式标准纬线，这时退回 latitude_of_origin。
+////				double singleStandardParallelDeg = 0;
+////				if (hasStandardParallel1)
+////				{
+////					singleStandardParallelDeg = standardParallel1Deg;
+////				}
+////				else if (hasStandardParallel2)
+////				{
+////					singleStandardParallelDeg = standardParallel2Deg;
+////				}
+////				else
+////				{
+////					if (!TryGetNormProjParm(spatialReference, SRS_PP_LATITUDE_OF_ORIGIN, singleStandardParallelDeg))
+////					{
+////						return false;
+////					}
+////				}
+////
+////				southLatitudeDeg = ClampLatitude(singleStandardParallelDeg - 3);
+////				northLatitudeDeg = ClampLatitude(singleStandardParallelDeg + 3);
+////			}
+////
+////			const double normalizedCentralMeridianDeg = NormalizeLongitude(centralMeridianDeg);
+////			westLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg - 30);
+////			eastLongitudeDeg = ClampLongitude(normalizedCentralMeridianDeg + 30);
+////			areaName = "Heuristic area of use for Lambert Conformal Conic";
+////			return true;
+////		}
+////
+////		// 规则（3）：其它投影不处理。
+////		return false;
+////	}
+////
+////	static bool ApplyUsageNodeToSpatialReference(OGRSpatialReference& spatialReference, double westLongitudeDeg, double southLatitudeDeg, double eastLongitudeDeg, double northLatitudeDeg, const std::string& areaName)
+////	{
+////		//  1) 先导出成 WKT2；
+////		//  2) 再导入到一个临时 SRS；
+////		//  3) 在临时 SRS 的根节点上插入 USAGE 节点；
+////		//  4) 再导出并重新导回原对象。
+////		//
+////		// 好处：
+////		//   - 能确保修改的是 WKT2 结构；
+////		//   - 避免对原对象做半完成状态的直接修改；
+////		//   - 更便于统一验证和失败回滚。
+////
+////		const char* exportOptions[] =
+////		{
+////			"FORMAT=WKT2_2019",
+////			nullptr
+////		};
+////
+////		char* wkt2Text = nullptr;
+////		if (spatialReference.exportToWkt(&wkt2Text, exportOptions) != OGRERR_NONE || wkt2Text == nullptr)
+////		{
+////			if (wkt2Text)
+////			{
+////				CPLFree(wkt2Text);
+////			}
+////			return false;
+////		}
+////
+////		OGRSpatialReference wkt2SpatialReference;
+////		const std::string wkt2String = wkt2Text;
+////		CPLFree(wkt2Text);
+////		wkt2Text = nullptr;
+////
+////		// 用导出的 WKT2 构造一个临时 SRS。
+////		if (wkt2SpatialReference.importFromWkt(wkt2String.c_str()) != OGRERR_NONE)
+////		{
+////			return false;
+////		}
+////
+////		OGR_SRSNode* const rootNode = wkt2SpatialReference.GetRoot();
+////		if (!rootNode)
+////		{
+////			return false;
+////		}
+////
+////		// 先把已有的 USAGE 节点全部删掉。避免重复挂载多个 USAGE，或者保留旧的错误范围。
+////		for (;;)
+////		{
+////			const int usageIndex = rootNode->FindChild("USAGE");
+////			if (usageIndex < 0)
+////			{
+////				break;
+////			}
+////
+////			rootNode->DestroyChild(usageIndex);
+////		}
+////
+////		OGR_SRSNode* const usageNode = CreateUsageNode(areaName, westLongitudeDeg, southLatitudeDeg, eastLongitudeDeg, northLatitudeDeg);
+////
+////		// 为了保持 WKT 结构的整洁，如果根节点已有 ID 节点，就把 USAGE 插到 ID 前面；否则直接追加到末尾。
+////		const int idIndex = rootNode->FindChild("ID");
+////		if (idIndex >= 0)
+////		{
+////			rootNode->InsertChild(usageNode, idIndex);
+////		}
+////		else
+////		{
+////			rootNode->AddChild(usageNode);
+////		}
+////
+////		char* updatedWkt2Text = nullptr;
+////		if (wkt2SpatialReference.exportToWkt(&updatedWkt2Text, exportOptions) != OGRERR_NONE || updatedWkt2Text == nullptr)
+////		{
+////			if (updatedWkt2Text)
+////			{
+////				CPLFree(updatedWkt2Text);
+////			}
+////			return false;
+////		}
+////
+////		// importFromWkt() 可能会重建内部对象，因此先记住当前对象的轴映射策略与数据轴映射关系，后面再恢复，避免破坏调用方已有设置。
+////		const OSRAxisMappingStrategy axisMappingStrategy = spatialReference.GetAxisMappingStrategy();
+////		const std::vector<int> dataAxisToSrsAxisMapping = spatialReference.GetDataAxisToSRSAxisMapping();
+////
+////		const std::string updatedWkt2String = updatedWkt2Text;
+////		CPLFree(updatedWkt2Text);
+////		updatedWkt2Text = nullptr;
+////
+////		// 把加好 USAGE 的 WKT2 重新导回原对象。
+////		if (spatialReference.importFromWkt(updatedWkt2String.c_str()) != OGRERR_NONE)
+////		{
+////			return false;
+////		}
+////
+////		// 恢复轴映射设置。
+////		spatialReference.SetAxisMappingStrategy(axisMappingStrategy);
+////		if (!dataAxisToSrsAxisMapping.empty())
+////		{
+////			spatialReference.SetDataAxisToSRSAxisMapping(dataAxisToSrsAxisMapping);
+////		}
+////
+////		// 最后再调用一次 GetAreaOfUse() 做结果验证：只有当 GDAL 能够正确从修改后的 CRS 中读回 area-of-use，才认为本次写入真正成功。
+////		double verifyWestLongitudeDeg = 0;
+////		double verifySouthLatitudeDeg = 0;
+////		double verifyEastLongitudeDeg = 0;
+////		double verifyNorthLatitudeDeg = 0;
+////		const char* verifyAreaName = nullptr;
+////
+////		return spatialReference.GetAreaOfUse(&verifyWestLongitudeDeg, &verifySouthLatitudeDeg, &verifyEastLongitudeDeg, &verifyNorthLatitudeDeg, &verifyAreaName) &&
+////			IsValidAreaOfUse(verifyWestLongitudeDeg, verifySouthLatitudeDeg, verifyEastLongitudeDeg, verifyNorthLatitudeDeg);
+////	}
+////} // namespace
+////
+////bool AddExtraAreaInfo(OGRSpatialReference& spatialReference)
+////{
+////	// 如果对象本身已经带有合法的 area-of-use，就直接返回 true，不重复覆盖。
+////	double existingWestLongitudeDeg = 0;
+////	double existingSouthLatitudeDeg = 0;
+////	double existingEastLongitudeDeg = 0;
+////	double existingNorthLatitudeDeg = 0;
+////	const char* existingAreaName = nullptr;
+////
+////	if (spatialReference.GetAreaOfUse(&existingWestLongitudeDeg, &existingSouthLatitudeDeg, &existingEastLongitudeDeg, &existingNorthLatitudeDeg, &existingAreaName) &&
+////		internal2::IsValidAreaOfUse(existingWestLongitudeDeg, existingSouthLatitudeDeg, existingEastLongitudeDeg, existingNorthLatitudeDeg))
+////	{
+////		return true;
+////	}
+////
+////	// 尝试推导一个“额外补充”的 area-of-use。
+////	double westLongitudeDeg = 0;
+////	double southLatitudeDeg = 0;
+////	double eastLongitudeDeg = 0;
+////	double northLatitudeDeg = 0;
+////	std::string areaName = "";
+////	if (!internal2::TryComputeAreaOfUseByRule(spatialReference, westLongitudeDeg, southLatitudeDeg, eastLongitudeDeg, northLatitudeDeg, areaName))
+////	{
+////		// 不属于指定投影类型，或缺少必要参数时，返回 false。
+////		return false;
+////	}
+////
+////	// 计算成功后，将 USAGE/AREA/BBOX 写回到 spatialReference。
+////	return internal2::ApplyUsageNodeToSpatialReference(spatialReference, westLongitudeDeg, southLatitudeDeg, eastLongitudeDeg, northLatitudeDeg, areaName);
+////}
+////
+////
+////bool GetCartesianExtents(const std::string& wkt, double& minX, double& minY, double& maxX, double& maxY)
+////{
+////	OGRSpatialReference spatialReference;
+////	if (spatialReference.importFromWkt(wkt.c_str()) != OGRERR_NONE)
+////	{
+////		return false;
+////	}
+////
+////	const char* existingAreaName = nullptr;
+////	if (spatialReference.GetAreaOfUse(&minX, &minY, &maxX, &maxY, &existingAreaName))
+////	{
+////		return true;
+////	}
+////
+////	if (!AddExtraAreaInfo(spatialReference))
+////	{
+////		return false;
+////	}
+////
+////	return spatialReference.GetAreaOfUse(&minX, &minY, &maxX, &maxY, &existingAreaName);
+////}

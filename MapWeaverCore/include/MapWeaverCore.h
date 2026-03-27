@@ -133,9 +133,9 @@ struct BuildVisibleMapRequestItemsInput
 
 MAPWEAVERCORE_PORT std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapRequestItemsInput& input, bool* success = nullptr);
 
-MAPWEAVERCORE_PORT bool TryExportWkt2WithCustomTransverseMercatorAreaBbox(const std::string& inputWkt, std::string& outputWkt2, bool* areaBboxInjected = nullptr);
+//MAPWEAVERCORE_PORT bool TryExportWkt2WithCustomTransverseMercatorAreaBbox(const std::string& inputWkt, std::string& outputWkt2, bool* areaBboxInjected = nullptr);
 
-MAPWEAVERCORE_PORT bool GetCartesianExtents(const std::string& wkt, double& minX, double& minY, double& maxX, double& maxY);
+//MAPWEAVERCORE_PORT bool GetCartesianExtents(const std::string& wkt, double& minX, double& minY, double& maxX, double& maxY);
 
 
 
