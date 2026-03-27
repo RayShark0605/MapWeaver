@@ -7,6 +7,7 @@
 #include "MapLayer.h"
 #include "ArcGISMapServiceInfo.h"
 #include <string>
+#include <vector>
 
 MAPWEAVERCORE_PORT bool IsUrlForWMTS(const std::string& urlUtf8);
 

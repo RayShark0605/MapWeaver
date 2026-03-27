@@ -15,15 +15,22 @@
 #include "cpl_conv.h"
 
 #include "GB_Crypto.h"
-#include <regex>
-#include <ogr_core.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
-#include <iomanip>
-#include <sstream>
-#include <limits>
-#include <set>
 #include <deque>
+#include <iomanip>
+#include <limits>
+#include <ogr_core.h>
+#include <set>
+#include <sstream>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 constexpr static double tiandituRenderingPixelSize = 0.0254 / 96;	// 天地图：0.0254 米（1 英寸）除以 96 像素（常见屏幕分辨率）
 constexpr static double standardRenderingPixelSize = 0.00028;		// 标准：0.28 毫米（0.00028 米）
@@ -41,20 +48,20 @@ enum class RasterIdentifyFormat
 
 bool IsUrlForWMTS(const std::string& urlUtf8)
 {
-	// 包含 SERVICE=WMTS 键值对（KVP风格）
-	if (GB_Utf8Find(urlUtf8, GB_STR("SERVICE=WMTS"), false) > 0)
+	// 包含 SERVICE=WMTS 键值对（KVP 风格）
+	if (GB_Utf8Find(urlUtf8, GB_STR("SERVICE=WMTS"), false) >= 0)
 	{
 		return true;
 	}
 
 	// RESTful 风格的 WMTS
-	if (GB_Utf8Find(urlUtf8, GB_STR("/WMTSCapabilities.xml"), false) > 0)
+	if (GB_Utf8Find(urlUtf8, GB_STR("/WMTSCapabilities.xml"), false) >= 0)
 	{
 		return true;
 	}
 
-	// 匹配 "/wmts?", "/wmts/" 
-	if (GB_Utf8Find(urlUtf8, GB_STR("/wmts?"), false) > 0 || GB_Utf8Find(urlUtf8, GB_STR("/wmts/"), false) > 0)
+	// 匹配 "/wmts?", "/wmts/"
+	if (GB_Utf8Find(urlUtf8, GB_STR("/wmts?"), false) >= 0 || GB_Utf8Find(urlUtf8, GB_STR("/wmts/"), false) >= 0)
 	{
 		return true;
 	}
@@ -70,45 +77,84 @@ bool IsUrlForWMTS(const std::string& urlUtf8)
 
 static inline std::string ConvertRawBytesToUtf8(const std::string& rawBytes)
 {
+	if (rawBytes.empty())
+	{
+		return rawBytes;
+	}
+
 	try
 	{
-		const int64_t startPos = GB_Utf8Find(rawBytes, GB_STR("encoding"), false);
-		if (startPos < 0)
+		const size_t searchLength = std::min<size_t>(rawBytes.size(), 512);
+		const std::string xmlHead = rawBytes.substr(0, searchLength);
+
+		const int64_t encodingKeyPos = GB_Utf8Find(xmlHead, GB_STR("encoding"), false);
+		if (encodingKeyPos < 0)
 		{
-			GBLOG_WARNING("Failed to find encoding declaration in XML. Defaulting to UTF-8.");
 			return rawBytes;
 		}
 
-		const int64_t firstPos = GB_Utf8Find(rawBytes, GB_STR("\""), false, startPos + 8);
-		if (firstPos < 0 || firstPos - startPos > 20)
+		const int64_t equalPos = GB_Utf8Find(xmlHead, GB_STR("="), false, encodingKeyPos + 8);
+		if (equalPos < 0)
 		{
-			GBLOG_WARNING("Failed to find opening quote for encoding declaration in XML. Defaulting to UTF-8.");
 			return rawBytes;
 		}
 
-		const int64_t secondPos = GB_Utf8Find(rawBytes, GB_STR("\""), false, firstPos + 1);
-		if (secondPos < 0 || secondPos - firstPos > 30)
+		int64_t quotePos = -1;
+		char quoteCharacter = '\0';
+		for (int64_t i = equalPos + 1; i < static_cast<int64_t>(xmlHead.size()); i++)
 		{
-			GBLOG_WARNING("Failed to find closing quote for encoding declaration in XML. Defaulting to UTF-8.");
+			const char currentCharacter = xmlHead[static_cast<size_t>(i)];
+			if (currentCharacter == '"' || currentCharacter == '\'')
+			{
+				quoteCharacter = currentCharacter;
+				quotePos = i;
+				break;
+			}
+			if (!std::isspace(static_cast<unsigned char>(currentCharacter)))
+			{
+				break;
+			}
+		}
+
+		if (quotePos < 0)
+		{
 			return rawBytes;
 		}
 
-		const std::string encoding = GB_Utf8Substr(rawBytes, firstPos + 1, secondPos - firstPos - 1);
+		int64_t endQuotePos = -1;
+		for (int64_t i = quotePos + 1; i < static_cast<int64_t>(xmlHead.size()); i++)
+		{
+			if (xmlHead[static_cast<size_t>(i)] == quoteCharacter)
+			{
+				endQuotePos = i;
+				break;
+			}
+		}
+
+		if (endQuotePos <= quotePos + 1)
+		{
+			return rawBytes;
+		}
+
+		const std::string encoding = GB_Utf8Substr(xmlHead, quotePos + 1, endQuotePos - quotePos - 1);
 		if (GB_Utf8Equals(encoding, GB_STR("utf-8"), false) || GB_Utf8Equals(encoding, GB_STR("utf8"), false))
 		{
 			return rawBytes;
 		}
+
 		return GB_BytesToUtf8(rawBytes, encoding);
 	}
 	catch (const std::exception& ex)
 	{
-		GBLOG_WARNING(GB_Utf8Format("Exception while converting raw bytes to UTF-8: %s. Defaulting to UTF-8.", ex.what()));
+		GBLOG_WARNING(GB_Utf8Format("Exception while converting raw bytes to UTF-8: %s. Defaulting to original bytes.", ex.what()));
 		return rawBytes;
 	}
 }
 
 bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapabilitiesXmlUtf8, const GB_NetworkRequestOptions& options)
 {
+	outCapabilitiesXmlUtf8.clear();
+
 	std::string urlUtf8 = rawUrlUtf8;
 	if (!IsUrlForWMTS(urlUtf8))
 	{
@@ -1946,6 +1992,30 @@ namespace
 		return urlUtf8;
 	}
 
+	static std::string BuildWmsRequestBboxText(const std::string& versionUtf8, const std::string& crsDefinitionUtf8, const GB_Rectangle& requestBoundingBox)
+	{
+		if (!requestBoundingBox.IsValid())
+		{
+			return "";
+		}
+
+		const bool isWms130OrLater = GB_Utf8StartsWith(versionUtf8, "1.3", true) || GB_Utf8StartsWith(versionUtf8, "2.", true);
+		const bool shouldReverseAxis =
+			isWms130OrLater &&
+			GeoCrsManager::IsDefinitionValidCached(crsDefinitionUtf8) &&
+			GeoCrsManager::IsDefinitionAxisOrderReversedCached(crsDefinitionUtf8);
+
+		if (!shouldReverseAxis)
+		{
+			return BuildRectangleBboxText(requestBoundingBox);
+		}
+
+		return MakeStableDoubleText(requestBoundingBox.minY) + "," +
+			MakeStableDoubleText(requestBoundingBox.minX) + "," +
+			MakeStableDoubleText(requestBoundingBox.maxY) + "," +
+			MakeStableDoubleText(requestBoundingBox.maxX);
+	}
+
 	static std::string BuildWmsGetMapUrl(const BuildVisibleMapRequestItemsInput& input, const WmsLayerProperty& wmsLayer, const std::string& styleName, const std::string& crsDefinitionUtf8, const std::string& formatName, const GB_Rectangle& requestBoundingBox, size_t imageWidth, size_t imageHeight)
 	{
 		std::string urlUtf8 = GetFirstHttpGetUrl(input.capabilities->capability.request.getMap.dcpTypes);
@@ -1971,7 +2041,7 @@ namespace
 		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "FORMAT", formatName);
 		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "WIDTH", std::to_string(imageWidth));
 		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "HEIGHT", std::to_string(imageHeight));
-		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "BBOX", BuildRectangleBboxText(requestBoundingBox));
+		urlUtf8 = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "BBOX", BuildWmsRequestBboxText(versionUtf8, crsDefinitionUtf8, requestBoundingBox));
 
 		for (size_t i = 0; i < wmsLayer.dimensions.size(); i++)
 		{
@@ -1988,7 +2058,10 @@ namespace
 
 bool RequestArcGISServerJson(const std::string& urlUtf8, ArcGISMapServiceInfo& mapServiceInfo, const GB_NetworkRequestOptions& options)
 {
-	const static std::vector<std::string> knownArcGISServerFeatureCodes = {
+	mapServiceInfo = ArcGISMapServiceInfo();
+
+	const static std::vector<std::string> knownArcGISServerFeatureCodes =
+	{
 		"/FeatureServer",
 		"/ImageServer",
 		"/MapServer",
@@ -1996,31 +2069,63 @@ bool RequestArcGISServerJson(const std::string& urlUtf8, ArcGISMapServiceInfo& m
 		"/VectorTileServer"
 	};
 
-	GB_NetworkResponse response;
-	for (const std::string& featureCode : knownArcGISServerFeatureCodes)
+	std::vector<std::string> candidateUrls;
+	candidateUrls.reserve(knownArcGISServerFeatureCodes.size() + 1);
+
+	const size_t queryPos = urlUtf8.find('?');
+	const std::string pathPart = (std::string::npos == queryPos) ? urlUtf8 : urlUtf8.substr(0, queryPos);
+	const std::string queryPart = (std::string::npos == queryPos) ? "" : urlUtf8.substr(queryPos);
+
+	for (size_t i = 0; i < knownArcGISServerFeatureCodes.size(); i++)
 	{
-		const int64_t index = GB_Utf8FindLast(urlUtf8, featureCode, false);
-		if (index <= 0)
+		const std::string& featureCode = knownArcGISServerFeatureCodes[i];
+		const int64_t index = GB_Utf8FindLast(pathPart, featureCode, false);
+		if (index < 0)
 		{
 			continue;
 		}
-		const std::string pjsonUrl = urlUtf8.substr(0, index + featureCode.size()) + "?f=pjson";
-		response = GB_RequestUrlData(pjsonUrl, options);
-		if (!response.ok)
+
+		const std::string serviceRootUrl = pathPart.substr(0, static_cast<size_t>(index) + featureCode.size()) + queryPart;
+		const std::string candidateUrl = GB_UrlOperator::SetUrlQueryValue(serviceRootUrl, "f", "pjson");
+		if (std::find(candidateUrls.begin(), candidateUrls.end(), candidateUrl) == candidateUrls.end())
 		{
-			response = GB_NetworkResponse();
-			continue;
+			candidateUrls.push_back(candidateUrl);
 		}
-		break;
-	}
-	if (!response.ok)
-	{
-		return false;
 	}
 
-	const std::string& jsonText = response.body;
-	std::string errorMessage = "";
-	return ParseArcGISMapServerJson(jsonText, &mapServiceInfo, &errorMessage);
+	const std::string originalPjsonUrl = GB_UrlOperator::SetUrlQueryValue(urlUtf8, "f", "pjson");
+	if (std::find(candidateUrls.begin(), candidateUrls.end(), originalPjsonUrl) == candidateUrls.end())
+	{
+		candidateUrls.push_back(originalPjsonUrl);
+	}
+
+	GB_NetworkResponse lastResponse;
+	std::string lastParseErrorMessage;
+	for (size_t i = 0; i < candidateUrls.size(); i++)
+	{
+		const std::string& candidateUrl = candidateUrls[i];
+		lastResponse = GB_RequestUrlData(candidateUrl, options);
+		if (!lastResponse.ok)
+		{
+			continue;
+		}
+
+		std::string parseErrorMessage;
+		if (ParseArcGISMapServerJson(lastResponse.body, &mapServiceInfo, &parseErrorMessage))
+		{
+			return true;
+		}
+
+		lastParseErrorMessage = parseErrorMessage;
+	}
+
+	GBLOG_WARNING(GB_Utf8Format(
+		"Failed to request or parse ArcGIS Server JSON from URL '%s'. Last HTTP status code: %ld. Last network error: %s. Last parse error: %s",
+		urlUtf8.c_str(),
+		lastResponse.httpStatusCode,
+		lastResponse.errorMessageUtf8.c_str(),
+		lastParseErrorMessage.c_str()));
+	return false;
 }
 
 namespace
@@ -4860,6 +4965,11 @@ namespace
 		{
 			styles[i] = wmsLayer->styles[i].nameUtf8;
 		}
+
+		if (success)
+		{
+			*success = true;
+		}
 		return styles;
 	}
 
@@ -5317,12 +5427,19 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 		const std::vector<std::string> wmsLayerStyles = GetWmsLayerStyles(wmsLayer);
 		if (input.styleUtf8.empty())
 		{
-			if (wmsLayerStyles.size() != 1)
+			if (wmsLayerStyles.empty())
+			{
+				styleName.clear();
+			}
+			else if (wmsLayerStyles.size() == 1)
+			{
+				styleName = wmsLayerStyles[0];
+			}
+			else
 			{
 				GBLOG_WARNING(GB_Utf8Format("Style is not specified for layer '%s', and there are %d styles available. Unable to determine which style to use.", input.layerNameUtf8.c_str(), static_cast<int>(wmsLayerStyles.size())));
 				return {};
 			}
-			styleName = wmsLayerStyles[0];
 		}
 		else
 		{
@@ -5502,7 +5619,7 @@ std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapReq
 //		while (*text != '\0')
 //		{
 //			if (*text != ' ' &&
-//				*text != '\t' &&
+//				*text != '	' &&
 //				*text != '\r' &&
 //				*text != '\n' &&
 //				*text != '\f' &&
