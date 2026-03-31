@@ -31,11 +31,26 @@
 #include <utility>
 #include <vector>
 
+// 本文件承担三类核心职责：
+// 1) 网络侧：下载 WMS/WMTS Capabilities，以及请求 ArcGIS Server 的 pjson；
+// 2) 解析侧：把 XML/JSON 解析为项目内部的统一能力模型；
+// 3) 构造侧：基于能力模型、请求区域和目标分辨率，生成 WMTS/WMS 的实际请求项。
+//
+// 注释策略说明：
+// - 对外导出函数与核心决策函数尽量给出“输入-处理-输出”的说明；
+// - 对显而易见的一行代码不做噪声式注释；
+// - 末尾的大段历史性注释代码保持原样，不纳入本次整理范围。
+
+// 与服务规范/行业实现相关的几个经验常量：
+// - tiandituRenderingPixelSize：天地图常见的屏幕像素物理尺寸假定；
+// - standardRenderingPixelSize：OGC 体系中计算 scaleDenominator 时常用的 0.28mm；
+// - oldArcGISServerMetersPerUnit：兼容老版本 ArcGIS Server 在 geographic CRS 下的比例尺换算行为。
 constexpr static double tiandituRenderingPixelSize = 0.0254 / 96;	// 天地图：0.0254 米（1 英寸）除以 96 像素（常见屏幕分辨率）
 constexpr static double standardRenderingPixelSize = 0.00028;		// 标准：0.28 毫米（0.00028 米）
 
 constexpr static double oldArcGISServerMetersPerUnit = 111194.8722222222405;		// ArcGIS Server 10.3 及以前的版本的“每度多少米”
 
+// ArcGIS Raster Identify 的输出格式位标记。当前文件中仅在内部解析与兼容逻辑中使用。
 enum class RasterIdentifyFormat
 {
 	Unknown = 0,
@@ -45,6 +60,8 @@ enum class RasterIdentifyFormat
 	Feature = 1 << 3
 };
 
+// 仅通过 URL 文本做快速判别，用来决定默认补充 WMS 还是 WMTS 的请求参数。
+// 注意：这里不保证服务一定真实可用，只是为了后续“先走哪条分支”提供一个廉价判断。
 bool IsUrlForWMTS(const std::string& urlUtf8)
 {
 	// 包含 SERVICE=WMTS 键值对（KVP 风格）
@@ -74,11 +91,19 @@ bool IsUrlForWMTS(const std::string& urlUtf8)
 	return false;
 }
 
+// 判断是否已经是 RESTful 风格的 WMTSCapabilities 直链。
+// 命中后不再额外拼接 KVP 参数，避免把 RESTful URL 破坏掉。
 static inline bool IsRestfulWmtsCapabilitiesUrl(const std::string& urlUtf8)
 {
 	return GB_Utf8Find(urlUtf8, GB_STR("/WMTSCapabilities.xml"), false) >= 0;
 }
 
+// 把下载得到的原始字节流尽量转成 UTF-8 文本。
+// 处理策略：
+// 1) 读取 XML 头中声明的 encoding；
+// 2) 若声明本身就是 UTF-8，则直接返回原字节；
+// 3) 否则调用 GlobalBase 的严格编码转换函数进行转码；
+// 4) 任一步失败时保守回退到原字节，避免因“猜错编码”而直接丢数据。
 static inline std::string ConvertRawBytesToUtf8(const std::string& rawBytes)
 {
 	if (rawBytes.empty())
@@ -155,6 +180,7 @@ static inline std::string ConvertRawBytesToUtf8(const std::string& rawBytes)
 	}
 }
 
+// 去掉 UTF-8 BOM。许多 XML/JSON 解析器可以容忍 BOM，但统一预处理后更稳妥。
 static inline std::string StripUtf8Bom(const std::string& text)
 {
 	if (text.size() >= 3 &&
@@ -168,6 +194,9 @@ static inline std::string StripUtf8Bom(const std::string& text)
 	return text;
 }
 
+// 下载 WMS/WMTS Capabilities 的统一入口。
+// 当前实现会优先尝试“规范化后的 URL”，失败时再回退到用户原始 URL。
+// 这样既能兼容缺参 URL，也能尽量保住一些服务端自定义的特殊入口。
 bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapabilitiesXmlUtf8, const GB_NetworkRequestOptions& options)
 {
 	outCapabilitiesXmlUtf8.clear();
@@ -210,8 +239,12 @@ bool DownloadWmsCapabilities(const std::string& rawUrlUtf8, std::string& outCapa
 	return false;
 }
 
+// -------------------- 通用字符串/数字/JSON 小工具 --------------------
+// 这一段函数不直接面向业务对象，而是为后面的 ArcGIS JSON 解析、WMS/WMTS XML 解析、
+// URL 构造等流程提供可复用的底层支撑。
 namespace
 {
+	// 仅做 ASCII 空白裁剪。Capabilities/JSON 键值解析中足够使用，且避免引入额外依赖。
 	static std::string Trim(const std::string& text)
 	{
 		size_t beginIndex = 0;
@@ -229,6 +262,7 @@ namespace
 		return text.substr(beginIndex, endIndex - beginIndex);
 	}
 
+	// 仅处理 ASCII 的小写化。用于协议关键字、格式名等“规范应为 ASCII”的场景。
 	static inline std::string ToLowerAscii(const std::string& text)
 	{
 		std::string lowerText = text;
@@ -239,6 +273,8 @@ namespace
 		return lowerText;
 	}
 
+	// 在服务端声明的候选值中，按“不区分大小写”的方式寻找匹配项。
+	// 找到后返回服务端原始文本，便于后续原样带回请求参数。
 	static bool TryFindSupportedStringIgnoreCase(const std::vector<std::string>& supportedValues, const std::string& inputValue, std::string* matchedValue)
 	{
 		if (matchedValue)
@@ -268,6 +304,7 @@ namespace
 		return false;
 	}
 
+	// 解析 ArcGIS Server 常见的逗号分隔字段，例如 capabilities / formats / extensions。
 	static std::vector<std::string> SplitCommaSeparated(const std::string& text)
 	{
 		std::vector<std::string> values;
@@ -551,6 +588,10 @@ namespace
 		return TryGetBool(childValue, boolValue);
 	}
 
+	// -------------------- ArcGIS Server pjson 解析辅助 --------------------
+	// 这些函数尽量按“宽进严出”的原则实现：
+	// - 输入端允许数字/字符串等常见混写；
+	// - 输出端只写入通过基本合法性检查的字段。
 	static inline bool ParseSpatialReference(const CPLJSONObject& jsonObject, ArcGISSpatialReference* spatialReference)
 	{
 		if (!spatialReference || !HasUsableValue(jsonObject) || CPLJSONObject::Type::Object != jsonObject.GetType())
@@ -860,6 +901,8 @@ namespace
 			!mapServiceInfo.m_supportedExtensions.empty();
 	}
 
+	// ArcGIS Server MapService / ImageService / FeatureService 根描述的统一解析入口。
+	// 目标不是 100% 覆盖所有 pjson 字段，而是提取当前项目后续决策所需的关键元数据。
 	static bool ParseArcGISMapServerJson(const std::string& jsonText, ArcGISMapServiceInfo* mapServiceInfo, std::string* errorMessage)
 	{
 		if (!errorMessage)
@@ -1009,6 +1052,7 @@ namespace
 		return true;
 	}
 
+	// 使用 max_digits10 输出 double，尽量保证“文本往返后数值不丢失”。
 	static std::string MakeStableDoubleText(double value)
 	{
 		std::ostringstream stream;
@@ -1027,6 +1071,8 @@ namespace
 		return MakeStableDoubleText(rectangle.minX) + "," + MakeStableDoubleText(rectangle.minY) + "," + MakeStableDoubleText(rectangle.maxX) + "," + MakeStableDoubleText(rectangle.maxY);
 	}
 
+	// -------------------- 分辨率 / LOD / 输出尺寸决策辅助 --------------------
+	// 这一段逻辑决定“请求哪个缩放级别、输出多大图、URL 里 BBOX / WIDTH / HEIGHT 写什么”。
 	static bool TryParseIntStrict(const std::string& text, int& outValue)
 	{
 		outValue = 0;
@@ -1112,6 +1158,8 @@ namespace
 		return nullptr;
 	}
 
+	// 在一个 TileMatrixSet 中选择最合适的 TileMatrix。
+	// 既支持直接按 zoomLevel 精确定位，也支持根据目标分辨率按策略择优。
 	static const WmtsTileMatrix* SelectTileMatrix(const WmtsTileMatrixSet& tileMatrixSet, double targetResolution, int requestedZoomLevel, MapRenderTargetOptions::LodSelectMode lodSelectMode, int minZoomLevel, int maxZoomLevel)
 	{
 		if (requestedZoomLevel >= 0)
@@ -1258,8 +1306,8 @@ namespace
 			return false;
 		}
 
-		const long double minRoundSourceValue = static_cast<long double>(std::numeric_limits<long long>::min());
-		const long double maxRoundSourceValue = static_cast<long double>(std::numeric_limits<long long>::max());
+		constexpr long double minRoundSourceValue = static_cast<long double>(std::numeric_limits<long long>::min());
+		constexpr long double maxRoundSourceValue = static_cast<long double>(std::numeric_limits<long long>::max());
 		const long double valueAsLongDouble = static_cast<long double>(value);
 		if (valueAsLongDouble < minRoundSourceValue || valueAsLongDouble > maxRoundSourceValue)
 		{
@@ -1320,6 +1368,8 @@ namespace
 		return outWidth > 0 && outHeight > 0;
 	}
 
+	// 把用户的“渲染目标”统一归约为一个最终目标分辨率。
+	// 后续无论是 WMTS 选 LOD，还是 WMS 反算 WIDTH/HEIGHT，都只依赖这个统一结果。
 	static bool ResolveTargetResolution(const BuildVisibleMapRequestItemsInput& input, const std::string& targetCrsDefinitionUtf8, const GB_Rectangle& requestBoundingBox, const WmtsTileMatrixSet* tileMatrixSet, double& outTargetResolution, int& outRequestedZoomLevel)
 	{
 		outTargetResolution = 0;
@@ -1441,6 +1491,8 @@ namespace
 		return false;
 	}
 
+	// 依据目标分辨率与 WMS 图层/服务端限制，计算 GetMap 的 WIDTH / HEIGHT。
+	// 这里同时处理 fixedWidth/fixedHeight、最大尺寸约束以及纵横比保持等细节。
 	static bool ComputeWmsImageSize(const BuildVisibleMapRequestItemsInput& input, const WmsLayerProperty& wmsLayer, const GB_Rectangle& requestBoundingBox, double targetResolution, size_t serviceMaxWidth, size_t serviceMaxHeight, size_t& outWidth, size_t& outHeight)
 	{
 		outWidth = 0;
@@ -1627,6 +1679,12 @@ namespace
 	}
 
 
+	// -------------------- 多边形与矩形关系 / 自适应请求框辅助 --------------------
+	// WMS 请求只能直接发矩形 BBOX，而用户的可见区域可能是任意多边形。
+	// 下面这组函数用于：
+	// 1) 判断矩形与多边形的覆盖关系；
+	// 2) 把复杂区域自适应拆成若干矩形；
+	// 3) 再尽量把相邻小矩形合并，减少请求数量。
 	enum class PolygonRectangleCoverageRelation
 	{
 		Outside = 0,
@@ -1767,12 +1825,9 @@ namespace
 		return GB_Point2d(x, boundaryY);
 	}
 
-	static void ClipPolygonWithBoundary(
-		const std::vector<GB_Point2d>& inputVertices,
-		std::vector<GB_Point2d>& outputVertices,
-		bool (*isInside)(const GB_Point2d&, double),
-		GB_Point2d(*computeIntersection)(const GB_Point2d&, const GB_Point2d&, double),
-		double boundaryValue)
+	// Sutherland-Hodgman 风格的半平面裁剪。
+	// 这里拆成“按单个边界依次裁剪”，便于复用到矩形四条边。
+	static void ClipPolygonWithBoundary(const std::vector<GB_Point2d>& inputVertices, std::vector<GB_Point2d>& outputVertices, bool (*isInside)(const GB_Point2d&, double), GB_Point2d(*computeIntersection)(const GB_Point2d&, const GB_Point2d&, double), double boundaryValue)
 	{
 		outputVertices.clear();
 		if (inputVertices.empty())
@@ -1806,6 +1861,8 @@ namespace
 		RemoveDuplicateAdjacentVertices(outputVertices);
 	}
 
+	// 将多边形裁到矩形内。
+	// 主要作为 GB_Polygon::ComputeIntersection 失败时的保底近似手段，用于覆盖判定而非高精度拓扑输出。
 	static bool TryClipPolygonToRectangle(const GB_Polygon& polygon, const GB_Rectangle& rectangle, std::vector<GB_Point2d>& outVertices)
 	{
 		outVertices.clear();
@@ -1848,7 +1905,7 @@ namespace
 
 	static double ComputePolygonRegionsNetArea(const std::vector<GB_Polygon>& outerAreas, const std::vector<std::vector<GB_Polygon>>& holeAreas)
 	{
-		double totalArea = 0.0;
+		double totalArea = 0;
 		for (size_t outerIndex = 0; outerIndex < outerAreas.size(); outerIndex++)
 		{
 			const double outerArea = outerAreas[outerIndex].GetUnsignedArea();
@@ -1873,6 +1930,8 @@ namespace
 		return totalArea;
 	}
 
+	// 判断矩形与请求多边形之间是“完全在外 / 部分相交 / 完全覆盖”。
+	// 优先走更可靠的多边形求交；若失败，再退化到裁剪近似。
 	static PolygonRectangleCoverageRelation ClassifyPolygonRectangleCoverage(const GB_Polygon& polygon, const GB_Rectangle& rectangle)
 	{
 		if (!polygon.IsValid() || !rectangle.IsValid())
@@ -2054,6 +2113,11 @@ namespace
 		return mergedAny;
 	}
 
+	// 把一个复杂多边形自适应拆分成更贴合边界的一组请求矩形。
+	// 目标是：
+	// - 对完全被覆盖的区域直接使用大矩形；
+	// - 对边界附近继续细分；
+	// - 当矩形在像素意义上已经足够小，则停止细分，避免请求数爆炸。
 	static void BuildAdaptivePolygonRequestRectangles(const GB_Polygon& polygon, const GB_Rectangle& polygonBoundingBox, double targetResolution, std::vector<GB_Rectangle>& outRectangles)
 	{
 		outRectangles.clear();
@@ -2115,12 +2179,18 @@ namespace
 			pendingRectangles.push_back(GB_Rectangle(centerX, centerY, currentRectangle.maxX, currentRectangle.maxY));
 		}
 
-		while (TryMergeAdjacentRectangles(outRectangles))
+		while (true)
 		{
+			if (!TryMergeAdjacentRectangles(outRectangles))
+			{
+				break;
+			}
 		}
 	}
 
 
+	// -------------------- WMTS / WMS URL 构造辅助 --------------------
+	// 这部分负责把“已经确定好的图层/格式/范围/尺寸/维度”等信息最终落到 URL 上。
 	static std::string GetDefaultDimensionValue(const WmtsDimension& dimension)
 	{
 		if (!dimension.defaultValueUtf8.empty())
@@ -2130,6 +2200,8 @@ namespace
 		return dimension.values.empty() ? "" : dimension.values[0];
 	}
 
+	// 优先使用 WMTS RESTful 模板构造瓦片 URL。
+	// 只有服务声明了对应 format 的模板时才可用，否则退回 KVP 风格。
 	static std::string BuildWmtsRestfulUrl(const WmtsTileLayer& tileLayer, const std::string& formatName, const std::string& styleName, const std::string& tileMatrixSetName, const WmtsTileMatrix& tileMatrix, int tileRow, int tileCol)
 	{
 		auto templateIterator = tileLayer.getTileUrls.find(formatName);
@@ -2188,6 +2260,7 @@ namespace
 		return "";
 	}
 
+	// 在没有 RESTful 模板时，按 KVP 方式构造 WMTS GetTile URL。
 	static std::string BuildWmtsKvpUrl(const BuildVisibleMapRequestItemsInput& input, const WmtsTileLayer& tileLayer, const std::string& styleName, const std::string& tileMatrixSetName, const std::string& formatName, const WmtsTileMatrix& tileMatrix, int tileRow, int tileCol)
 	{
 		std::string urlUtf8 = GetFirstHttpGetUrl(input.capabilities->capability.request.getTile.dcpTypes);
@@ -2224,6 +2297,9 @@ namespace
 		return urlUtf8;
 	}
 
+	// 生成 WMS 请求中的 BBOX 文本。
+	// WMS 1.3.0 下，部分 geographic CRS 需要遵循权威轴顺序（例如纬度在前），
+	// 因此这里会结合 CRS 轴顺序信息决定输出坐标顺序。
 	static std::string BuildWmsRequestBboxText(const std::string& versionUtf8, const std::string& crsDefinitionUtf8, const GB_Rectangle& requestBoundingBox)
 	{
 		if (!requestBoundingBox.IsValid())
@@ -2248,6 +2324,8 @@ namespace
 			MakeStableDoubleText(requestBoundingBox.maxX);
 	}
 
+	// 按当前项目约定构造 WMS GetMap 请求。
+	// 除基础参数外，还会自动补上图层默认维度值（若存在且有默认值）。
 	static std::string BuildWmsGetMapUrl(const BuildVisibleMapRequestItemsInput& input, const WmsLayerProperty& wmsLayer, const std::string& styleName, const std::string& crsDefinitionUtf8, const std::string& formatName, const GB_Rectangle& requestBoundingBox, size_t imageWidth, size_t imageHeight)
 	{
 		std::string urlUtf8 = GetFirstHttpGetUrl(input.capabilities->capability.request.getMap.dcpTypes);
@@ -2288,6 +2366,8 @@ namespace
 	}
 }
 
+// 对外导出的 ArcGIS Server 元信息请求接口。
+// 主要职责是：从用户给的任意 ArcGIS 服务相关 URL 中，尽量收敛出最合理的 `f=pjson` 请求候选。
 bool RequestArcGISServerJson(const std::string& urlUtf8, ArcGISMapServiceInfo& mapServiceInfo, const GB_NetworkRequestOptions& options)
 {
 	mapServiceInfo = ArcGISMapServiceInfo();
@@ -2362,6 +2442,9 @@ bool RequestArcGISServerJson(const std::string& urlUtf8, ArcGISMapServiceInfo& m
 
 namespace
 {
+	// -------------------- XML / Capabilities 解析辅助 --------------------
+	// 这里基于 GDAL 的 CPLXMLNode 做轻量遍历，不引入额外 XML 库。
+	// 重点是兼容常见的命名空间前缀、空白文本节点和服务端非严格写法。
 	static inline std::string GetXmlNodeTagName(const CPLXMLNode* node)
 	{
 		if (!node || node->eType != CXT_Element || !node->pszValue)
@@ -4849,6 +4932,8 @@ namespace
 	};
 }
 
+// 对外导出的 Capabilities 解析入口。
+// 真正的解析工作由内部解析器对象完成；这里负责前置校验、初始化输出以及异常/失败收口。
 bool ParseWmsCapabilities(const std::string& capabilitiesXmlUtf8, const std::string& baseUrl, WmsCapabilitiesProperty& outCapabilities, const ArcGISMapServiceInfo* arcGISMapServiceInfo, const WmsParserOptions& options)
 {
 	outCapabilities = WmsCapabilitiesProperty();
@@ -4926,6 +5011,7 @@ namespace
 	}
 }
 
+// 以深度优先方式把树结构展开成文本，便于调试、日志记录和单元测试比对。
 std::string WmsTreeNode::ToString(const std::string& indentStringUtf8) const
 {
 	const size_t totalLength = CalculateSerializedLength(*this, indentStringUtf8.size());
@@ -4962,6 +5048,9 @@ std::string WmsTreeNode::ToString(const std::string& indentStringUtf8) const
 	return output;
 }
 
+// -------------------- 图层树构建辅助 --------------------
+// WMTS 图层常包含 style / tileMatrixSet / format 三层附加维度，
+// 这里根据 BuildLayerTreeOptions 决定是否折叠仅有唯一候选的中间层。
 namespace
 {
 	static std::vector<WmsTreeNode> CreateTileLayerFormatNodes(const WmtsTileLayer& tileLayer, const std::string& path)
@@ -5184,6 +5273,8 @@ namespace
 		return nullptr;
 	}
 
+	// 根据 layerName 同时在 WMTS 图层与递归 WMS 图层中查标题。
+	// 当前是内部辅助函数，但保留了 success 语义，便于后续按需外提。
 	static std::string FindLayerTitle(const WmsCapabilitiesProperty* capabilities, const std::string& layerName, bool* success = nullptr)
 	{
 		if (success)
@@ -5340,6 +5431,8 @@ namespace
 		return GetTileLayerMatrixSets(tileLayer, success);
 	}
 
+	// 从服务支持的格式中尽量挑一个更适合地图渲染的输出格式。
+	// 策略偏向无损/带透明度友好的格式（例如 png），若无则退回到常见位图格式。
 	static std::string SelectAppropriateWmsFormat(const std::vector<std::string>& supportedWmsFormats, bool* success = nullptr)
 	{
 		if (success)
@@ -5388,6 +5481,7 @@ namespace
 	}
 
 
+	// WMTS 格式选择：优先从 RESTful 模板能实际构造的格式中选，再补看 capabilities 列出的 formats。
 	static std::string SelectAppropriateTileFormat(const WmtsTileLayer& tileLayer, bool* success = nullptr)
 	{
 		if (success)
@@ -5442,6 +5536,11 @@ namespace
 		return "";
 	}
 
+	// 将请求区域多边形从源 CRS 转到目标 CRS。
+	// 处理策略较保守：
+	// 1) 先裁到源 CRS 自身有效范围；
+	// 2) 若目标 CRS 有经纬度有效范围，则尽量经 EPSG:4326 中转并求交；
+	// 3) 允许一个输入多边形变成多个输出多边形，以兼容跨有效域分裂的情况。
 	static bool TransformGeoPolygon(const std::string& sourceWkt, const GB_Polygon& polygon, const std::string& targetWkt, std::vector<GB_Polygon>& outResult)
 	{
 		outResult.clear();
@@ -5568,6 +5667,10 @@ namespace
 	}
 }
 
+// 对外导出的“构造实际请求项”主入口。
+// 这是整个文件在业务层最核心的接口之一：
+// - WMTS 分支负责从可见区域筛选瓦片；
+// - WMS 分支负责把区域拆成合理的矩形 GetMap 请求。
 std::vector<MapRequestItem> BuildVisibleMapRequestItems(const BuildVisibleMapRequestItemsInput& input, bool* success)
 {
 	if (success)
